@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "findai-lan"
-version = "0.1.0"
-description = "Discover LAN-hosted OpenAI-compatible model servers and expose a unified gateway."
+version = "1.0.0"
+description = "Discover LAN-hosted OpenAI-compatible model services and expose a unified gateway."
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [

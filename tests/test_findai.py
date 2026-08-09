@@ -86,6 +86,15 @@ class ConfigTests(unittest.TestCase):
                 settings = Settings.from_env(env_file)
             self.assertEqual(settings.allowed_public_cidrs, ("121.48.164.135/32",))
 
+    def test_default_scan_mode_is_manual_only(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            env_file = Path(directory) / ".env"
+            env_file.write_text("", encoding="utf-8")
+            with patch.dict("os.environ", {}, clear=True):
+                settings = Settings.from_env(env_file)
+            self.assertFalse(settings.scan_on_startup)
+            self.assertEqual(settings.scan_interval_seconds, 0)
+
 
 class ProbeTests(unittest.IsolatedAsyncioTestCase):
     async def test_openai_model_list_is_recognized(self) -> None:
@@ -132,6 +141,25 @@ class ProbeTests(unittest.IsolatedAsyncioTestCase):
 
 
 class DiscoveryScanTests(unittest.IsolatedAsyncioTestCase):
+    async def test_manual_only_mode_does_not_create_periodic_task(self) -> None:
+        temporary = tempfile.TemporaryDirectory()
+        settings = Settings(
+            db_path=Path(temporary.name) / "scan.db",
+            scan_on_startup=False,
+            scan_interval_seconds=0,
+        )
+        store = ServiceStore(settings.db_path)
+        client = httpx.AsyncClient()
+        discovery = DiscoveryManager(settings, store, client)
+        try:
+            discovery.start_periodic()
+            self.assertIsNone(discovery._periodic_task)
+            self.assertEqual(discovery.state.status, "idle")
+        finally:
+            await client.aclose()
+            store.close()
+            temporary.cleanup()
+
     async def test_scan_records_serializable_range_logs(self) -> None:
         temporary = tempfile.TemporaryDirectory()
         settings = Settings(

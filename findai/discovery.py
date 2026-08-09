@@ -66,7 +66,7 @@ class ProtocolProber:
 
     async def probe(self, base_url: str, api_key: str | None = None) -> ProbeResult:
         started = time.perf_counter()
-        headers = {"Accept": "application/json", "User-Agent": "FindAI/0.1 discovery"}
+        headers = {"Accept": "application/json", "User-Agent": "FindAI/1.0 discovery"}
         if api_key:
             headers["Authorization"] = f"Bearer {api_key}"
 
@@ -579,6 +579,8 @@ class DiscoveryManager:
                 self.start_scan()
             except (RuntimeError, ValueError):
                 pass
+        if self.settings.scan_interval_seconds <= 0:
+            return
         while True:
             await asyncio.sleep(max(self.settings.scan_interval_seconds, 10))
             if not self._scan_task or self._scan_task.done():
@@ -588,6 +590,8 @@ class DiscoveryManager:
                     pass
 
     def start_periodic(self) -> None:
+        if not self.settings.scan_on_startup and self.settings.scan_interval_seconds <= 0:
+            return
         self._periodic_task = asyncio.create_task(
             self._periodic_loop(), name="findai-periodic-discovery"
         )

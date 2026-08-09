@@ -125,7 +125,8 @@ Invoke-RestMethod -Method Post `
 | `FINDAI_SCAN_CIDRS` | 自动推断 | 逗号分隔的私网 IPv4 CIDR |
 | `FINDAI_ALLOWED_PUBLIC_CIDRS` | 空 | 显式信任的公网 IPv4 单主机列表，只允许 `/32` |
 | `FINDAI_SCAN_PORTS` | 常见端口集合 | 支持 `8000-8010` 形式的小范围端口段 |
-| `FINDAI_SCAN_INTERVAL` | `300` | 自动重扫间隔，秒 |
+| `FINDAI_SCAN_INTERVAL` | `0` | 自动重扫间隔，秒；`0` 表示关闭周期扫描 |
+| `FINDAI_SCAN_ON_STARTUP` | `false` | 启动后是否立即扫描；默认仅允许网页按钮手动触发 |
 | `FINDAI_MAX_HOSTS` | `1024` | 单次扫描允许展开的最大 IP 数 |
 | `FINDAI_MAX_TARGETS` | `20000` | 单次扫描的 IP × 端口 × 协议组合上限 |
 | `FINDAI_MAX_CONCURRENCY` | `256` | TCP/HTTP 探测并发上限 |

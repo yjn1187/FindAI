@@ -86,7 +86,7 @@ class ModelGateway:
         headers = {
             "Accept": "application/json, text/event-stream",
             "Content-Type": "application/json",
-            "User-Agent": "FindAI/0.1 gateway",
+            "User-Agent": "FindAI/1.0 gateway",
         }
         api_key = self.discovery.credential_for(service)
         if api_key:

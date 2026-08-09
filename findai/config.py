@@ -116,7 +116,7 @@ class Settings:
     scan_cidrs: tuple[str, ...] = field(default_factory=infer_local_cidrs)
     allowed_public_cidrs: tuple[str, ...] = ()
     scan_ports: tuple[int, ...] = DEFAULT_PORTS
-    scan_interval_seconds: int = 300
+    scan_interval_seconds: int = 0
     connect_timeout_seconds: float = 0.35
     probe_timeout_seconds: float = 2.0
     proxy_timeout_seconds: float = 300.0
@@ -124,7 +124,7 @@ class Settings:
     max_concurrency: int = 256
     max_hosts: int = 1024
     max_targets: int = 20000
-    scan_on_startup: bool = True
+    scan_on_startup: bool = False
     gateway_key: str | None = None
     upstream_keys: dict[str, str] = field(default_factory=dict)
     log_path: Path = Path("data/logs/findai.log")
@@ -154,7 +154,7 @@ class Settings:
                 os.getenv("FINDAI_ALLOWED_PUBLIC_CIDRS")
             ),
             scan_ports=parse_ports(os.getenv("FINDAI_SCAN_PORTS")),
-            scan_interval_seconds=int(os.getenv("FINDAI_SCAN_INTERVAL", "300")),
+            scan_interval_seconds=int(os.getenv("FINDAI_SCAN_INTERVAL", "0")),
             connect_timeout_seconds=float(os.getenv("FINDAI_CONNECT_TIMEOUT", "0.35")),
             probe_timeout_seconds=float(os.getenv("FINDAI_PROBE_TIMEOUT", "2")),
             proxy_timeout_seconds=float(os.getenv("FINDAI_PROXY_TIMEOUT", "300")),
@@ -162,7 +162,7 @@ class Settings:
             max_concurrency=int(os.getenv("FINDAI_MAX_CONCURRENCY", "256")),
             max_hosts=int(os.getenv("FINDAI_MAX_HOSTS", "1024")),
             max_targets=int(os.getenv("FINDAI_MAX_TARGETS", "20000")),
-            scan_on_startup=_env_bool("FINDAI_SCAN_ON_STARTUP", True),
+            scan_on_startup=_env_bool("FINDAI_SCAN_ON_STARTUP", False),
             gateway_key=os.getenv("FINDAI_GATEWAY_KEY") or None,
             upstream_keys={str(key).rstrip("/"): str(value) for key, value in upstream_keys.items()},
             log_path=Path(os.getenv("FINDAI_LOG_PATH", "data/logs/findai.log")),

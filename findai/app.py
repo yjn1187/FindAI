@@ -77,7 +77,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     app = FastAPI(
         title="FindAI",
-        version="0.1.0",
+        version="1.0.0",
         description="LAN model discovery and OpenAI-compatible routing gateway.",
         lifespan=lifespan,
     )
