@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="tech">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark light">
+  <title>FindAI · 局域网模型发现</title>
+  <script>
+    try { document.documentElement.dataset.theme = localStorage.getItem("findai-theme") || "tech"; } catch (_) {}
+  </script>
+  <link rel="stylesheet" href="/assets/styles.css">
+</head>
+<body>
+  <div class="ambient ambient-a"></div>
+  <div class="ambient ambient-b"></div>
+
+  <header class="topbar">
+    <a class="brand" href="/">
+      <span class="radar-logo"><i></i></span>
+      <span><strong>FindAI</strong><small>LAN MODEL DISCOVERY</small></span>
+    </a>
+    <div class="top-actions">
+      <div class="theme-switch" role="group" aria-label="页面主题">
+        <button type="button" data-theme-option="tech">科技感</button>
+        <button type="button" data-theme-option="light">蓝白简约</button>
+      </div>
+      <div class="auth-box">
+        <label for="gateway-key">访问密钥</label>
+        <input id="gateway-key" type="password" autocomplete="off" placeholder="未启用可留空">
+        <button id="save-key" class="button ghost">保存</button>
+      </div>
+    </div>
+  </header>
+
+  <main>
+    <div id="notice" class="notice hidden"></div>
+
+    <section class="scan-spotlight">
+      <div class="scan-heading">
+        <div>
+          <p class="kicker"><span class="live-dot"></span>DISCOVERY CONTROL</p>
+          <h1>局域网模型扫描</h1>
+          <p>填写要扫描的网段和模型服务端口，FindAI 将识别 OpenAI 兼容 API 与 Ollama 服务。</p>
+        </div>
+        <span id="scan-status" class="status-pill idle">空闲</span>
+      </div>
+
+      <div class="scan-layout">
+        <div class="scan-form">
+          <div class="scan-fields">
+            <label>IPv4 网段
+              <input id="scan-cidrs" placeholder="192.168.110.0/24">
+              <small>多个网段用逗号分隔</small>
+            </label>
+            <label>模型服务端口
+              <input id="scan-ports" placeholder="11434,12434,1234,8000-8001">
+              <small>支持逗号和范围，例如 8000-8010</small>
+            </label>
+          </div>
+          <button id="start-scan" class="button primary scan-button">
+            <span class="button-radar"></span>
+            开始扫描局域网
+          </button>
+          <p class="scan-note">仅访问私网地址和配置端口，不会自动发送模型推理请求。</p>
+        </div>
+
+        <div class="scan-monitor">
+          <div class="progress-summary">
+            <span>本次扫描进度</span>
+            <strong id="metric-progress">0%</strong>
+            <small id="scan-caption">等待扫描</small>
+          </div>
+          <div class="progress-track"><i id="scan-progress-bar"></i></div>
+          <div class="scan-facts">
+            <article><span>已检查</span><b id="scan-count">0 / 0</b></article>
+            <article><span>开放端口</span><b id="open-count">0</b></article>
+            <article><span>命中服务</span><b id="found-count">0</b></article>
+          </div>
+        </div>
+      </div>
+      <div id="scan-feedback" class="scan-feedback hidden" role="status" aria-live="polite">
+        <span id="scan-feedback-icon" class="feedback-icon">✓</span>
+        <div><strong id="scan-feedback-title">扫描完成</strong><p id="scan-feedback-text"></p></div>
+      </div>
+    </section>
+
+    <section class="services-section">
+      <div class="section-heading">
+        <div><span class="kicker">SERVICE REGISTRY</span><h2>扫描结果与模型服务</h2></div>
+        <button id="refresh" class="button ghost">刷新列表</button>
+      </div>
+      <div id="services" class="service-list">
+        <div class="empty-state"><span class="empty-radar"></span><h3>还没有发现模型服务</h3><p>请在上方配置网段并开始扫描，或手工添加已知服务。</p></div>
+      </div>
+    </section>
+
+    <section class="overview-section">
+      <div class="section-heading compact-heading">
+        <div><span class="kicker">OVERVIEW</span><h2>运行概览</h2></div>
+      </div>
+      <div class="overview-grid">
+        <div class="metrics" aria-label="运行指标">
+          <article><span>发现服务</span><strong id="metric-services">0</strong><small>个节点</small></article>
+          <article><span>可用模型</span><strong id="metric-models">0</strong><small>条路由</small></article>
+          <article><span>在线比例</span><strong id="metric-online">—</strong><small>当前状态</small></article>
+        </div>
+
+        <article class="gateway-card panel">
+          <div class="gateway-title"><span class="gateway-icon">↗</span><span>统一 OpenAI 网关</span></div>
+          <div class="copy-row">
+            <code id="gateway-url">http://127.0.0.1:7070/v1</code>
+            <button class="icon-button" data-copy-target="gateway-url" title="复制网关地址">复制</button>
+          </div>
+          <div class="gateway-flow"><span>业务系统</span><i>→</i><strong>FindAI</strong><i>→</i><span>模型节点</span></div>
+        </article>
+      </div>
+    </section>
+
+    <section class="manual-section panel">
+      <div class="manual-copy">
+        <span class="kicker">MANUAL ENTRY</span>
+        <h2>手工添加模型节点</h2>
+        <p>用于自定义端口、HTTPS，或必须携带 API Key 才能返回模型列表的服务。</p>
+      </div>
+      <div class="manual-form">
+        <label>服务根地址
+          <input id="manual-url" placeholder="http://192.168.110.241:12434/v1">
+        </label>
+        <label>上游 API Key（可选，仅存内存）
+          <input id="manual-key" type="password" autocomplete="off" placeholder="输入上游服务密钥">
+        </label>
+        <button id="add-manual" class="button secondary">验证并添加</button>
+      </div>
+    </section>
+
+  </main>
+
+  <footer>
+    <span>FindAI 0.1 · local-first model infrastructure</span>
+    <a href="/docs" target="_blank" rel="noreferrer">API 文档 ↗</a>
+  </footer>
+  <script src="/assets/app.js" defer></script>
+</body>
+</html>

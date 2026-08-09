@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "findai-lan"
+version = "0.1.0"
+description = "Discover LAN-hosted OpenAI-compatible model servers and expose a unified gateway."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "fastapi>=0.115,<1",
+  "httpx>=0.28,<1",
+  "python-dotenv>=1.2,<2",
+  "uvicorn[standard]>=0.34,<1",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8,<9", "pytest-asyncio>=0.25,<1"]
+
+[project.scripts]
+findai = "findai.main:main"
+
+[tool.setuptools.packages.find]
+include = ["findai*"]
+
+[tool.setuptools.package-data]
+findai = ["web/*"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
