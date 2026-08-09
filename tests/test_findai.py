@@ -10,7 +10,7 @@ import httpx
 
 from findai.app import create_app
 from findai.config import Settings, parse_ports
-from findai.discovery import ProtocolProber
+from findai.discovery import DiscoveryManager, ProtocolProber
 from findai.gateway import ModelGateway
 from findai.models import ServiceRecord, service_id_for
 from findai.storage import ServiceStore
@@ -35,6 +35,32 @@ class ConfigTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             DiscoveryManager.validate_targets(["8.8.8.0/24"], [80], ["http"], 1024)
 
+    def test_scan_treats_bare_ipv4_address_as_32_host(self) -> None:
+        networks, _, _ = DiscoveryManager.validate_targets(
+            ["192.168.110.241"], [12434], ["http"], 1024
+        )
+        self.assertEqual([str(network) for network in networks], ["192.168.110.241/32"])
+
+    def test_scan_allows_explicit_public_host(self) -> None:
+        from findai.discovery import DiscoveryManager
+
+        networks, ports, schemes = DiscoveryManager.validate_targets(
+            ["121.48.164.135/32"],
+            [12434],
+            ["http"],
+            1024,
+            ["121.48.164.135/32"],
+        )
+        self.assertEqual([str(network) for network in networks], ["121.48.164.135/32"])
+        self.assertEqual(ports, [12434])
+        self.assertEqual(schemes, ["http"])
+
+    def test_public_allowlist_rejects_broad_networks(self) -> None:
+        from findai.config import parse_allowed_public_cidrs
+
+        with self.assertRaises(ValueError):
+            parse_allowed_public_cidrs("121.48.164.0/24")
+
     def test_dotenv_loads_but_does_not_override_process_environment(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             env_file = Path(directory) / ".env"
@@ -47,6 +73,18 @@ class ConfigTests(unittest.TestCase):
             self.assertEqual(settings.host, "0.0.0.0")
             self.assertEqual(settings.port, 9090)
             self.assertEqual(settings.scan_cidrs, ("192.168.9.0/24",))
+
+    def test_dotenv_loads_explicit_public_host_allowlist(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            env_file = Path(directory) / ".env"
+            env_file.write_text(
+                "FINDAI_SCAN_CIDRS=121.48.164.135/32\n"
+                "FINDAI_ALLOWED_PUBLIC_CIDRS=121.48.164.135/32\n",
+                encoding="utf-8",
+            )
+            with patch.dict("os.environ", {}, clear=True):
+                settings = Settings.from_env(env_file)
+            self.assertEqual(settings.allowed_public_cidrs, ("121.48.164.135/32",))
 
 
 class ProbeTests(unittest.IsolatedAsyncioTestCase):
@@ -93,6 +131,63 @@ class ProbeTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result.auth_required)
 
 
+class DiscoveryScanTests(unittest.IsolatedAsyncioTestCase):
+    async def test_scan_records_serializable_range_logs(self) -> None:
+        temporary = tempfile.TemporaryDirectory()
+        settings = Settings(
+            db_path=Path(temporary.name) / "scan.db",
+            scan_cidrs=("127.0.0.1/32",),
+            scan_ports=(65534,),
+            scan_on_startup=False,
+            max_concurrency=1,
+        )
+        store = ServiceStore(settings.db_path)
+        client = httpx.AsyncClient()
+        discovery = DiscoveryManager(settings, store, client)
+
+        async def closed_target(_: str, __: int, ___: str) -> tuple[None, bool]:
+            return None, False
+
+        discovery._probe_target = closed_target  # type: ignore[method-assign]
+        try:
+            discovery.start_scan()
+            self.assertIsNotNone(discovery._scan_task)
+            await discovery._scan_task
+
+            state = discovery.state.to_dict()
+            self.assertEqual(state["status"], "completed")
+            self.assertEqual(state["scanned"], 1)
+            self.assertTrue(all(isinstance(entry, dict) for entry in state["logs"]))
+            messages = [entry["message"] for entry in state["logs"]]
+            self.assertTrue(any("探测流程" in message for message in messages))
+            self.assertTrue(any("范围完成" in message for message in messages))
+            self.assertTrue(any("扫描完成" in message for message in messages))
+        finally:
+            await client.aclose()
+            store.close()
+            temporary.cleanup()
+
+    async def test_scan_log_keeps_only_latest_two_hundred_entries(self) -> None:
+        temporary = tempfile.TemporaryDirectory()
+        settings = Settings(
+            db_path=Path(temporary.name) / "scan.db",
+            scan_on_startup=False,
+        )
+        store = ServiceStore(settings.db_path)
+        client = httpx.AsyncClient()
+        discovery = DiscoveryManager(settings, store, client)
+        try:
+            for index in range(205):
+                discovery._record_scan_log(f"event-{index}")
+            self.assertEqual(len(discovery.state.logs), 200)
+            self.assertEqual(discovery.state.logs[0].message, "event-5")
+            self.assertEqual(discovery.state.logs[-1].message, "event-204")
+        finally:
+            await client.aclose()
+            store.close()
+            temporary.cleanup()
+
+
 class StorageTests(unittest.TestCase):
     def test_service_round_trip(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -112,10 +207,74 @@ class StorageTests(unittest.TestCase):
             actual = store.get(expected.id)
             self.assertIsNotNone(actual)
             self.assertEqual(actual.models, ["model-a"])
+            self.assertEqual(store.clear(), 1)
+            self.assertEqual(store.list(), [])
             store.close()
 
 
 class GatewayApiTests(unittest.IsolatedAsyncioTestCase):
+    async def test_dashboard_and_scan_responses_disable_browser_cache(self) -> None:
+        temporary = tempfile.TemporaryDirectory()
+        settings = Settings(
+            db_path=Path(temporary.name) / "app.db",
+            scan_cidrs=("127.0.0.1/32",),
+            scan_ports=(65534,),
+            scan_on_startup=False,
+        )
+        app = create_app(settings)
+        transport = httpx.ASGITransport(app=app)
+        try:
+            async with httpx.AsyncClient(transport=transport, base_url="http://findai.test") as client:
+                for path in ("/", "/assets/app.js", "/assets/favicon.png", "/api/scan"):
+                    response = await client.get(path)
+                    self.assertEqual(response.status_code, 200)
+                    self.assertIn("no-store", response.headers["cache-control"])
+        finally:
+            await app.state.http_client.aclose()
+            app.state.store.close()
+            temporary.cleanup()
+
+    async def test_clear_services_endpoint(self) -> None:
+        temporary = tempfile.TemporaryDirectory()
+        settings = Settings(
+            db_path=Path(temporary.name) / "app.db",
+            scan_cidrs=("127.0.0.1/32",),
+            scan_ports=(65534,),
+            scan_on_startup=False,
+        )
+        app = create_app(settings)
+        base_url = "http://10.0.0.20:8000"
+        service = ServiceRecord(
+            id=service_id_for(base_url),
+            name="Mock OpenAI service",
+            host="10.0.0.20",
+            port=8000,
+            scheme="http",
+            base_url=base_url,
+            api_kind="openai",
+            models=["local-chat"],
+        )
+        app.state.store.upsert(service)
+        app.state.discovery.set_credential(service.id, "temporary-key")
+        transport = httpx.ASGITransport(app=app)
+        try:
+            async with httpx.AsyncClient(transport=transport, base_url="http://findai.test") as client:
+                response = await client.delete("/api/services")
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(response.json(), {"deleted": 1})
+                self.assertEqual(app.state.store.list(), [])
+                self.assertIsNone(app.state.discovery.credential_for(service))
+
+                app.state.store.upsert(service)
+                app.state.discovery.state.status = "running"
+                blocked = await client.delete("/api/services")
+                self.assertEqual(blocked.status_code, 409)
+                self.assertEqual(len(app.state.store.list()), 1)
+        finally:
+            await app.state.http_client.aclose()
+            app.state.store.close()
+            temporary.cleanup()
+
     async def test_catalog_and_chat_proxy(self) -> None:
         temporary = tempfile.TemporaryDirectory()
         settings = Settings(

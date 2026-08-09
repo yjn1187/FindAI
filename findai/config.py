@@ -53,6 +53,29 @@ def parse_ports(value: str | None) -> tuple[int, ...]:
     return tuple(sorted(ports))
 
 
+def parse_allowed_public_cidrs(value: str | None) -> tuple[str, ...]:
+    """Parse explicitly trusted public IPv4 hosts.
+
+    Public scanning is intentionally limited to individual /32 hosts so an
+    operator cannot accidentally turn FindAI into a broad internet scanner.
+    """
+
+    if not value:
+        return ()
+    networks: set[str] = set()
+    for item in value.split(","):
+        item = item.strip()
+        if not item:
+            continue
+        network = IPv4Network(item, strict=False)
+        if network.prefixlen != 32 or not network.network_address.is_global:
+            raise ValueError(
+                "FINDAI_ALLOWED_PUBLIC_CIDRS entries must be public IPv4 hosts using /32"
+            )
+        networks.add(str(network))
+    return tuple(sorted(networks))
+
+
 def infer_local_cidrs() -> tuple[str, ...]:
     """Infer useful IPv4 scan ranges without platform-specific dependencies.
 
@@ -91,6 +114,7 @@ class Settings:
     port: int = 7070
     db_path: Path = Path("data/findai.db")
     scan_cidrs: tuple[str, ...] = field(default_factory=infer_local_cidrs)
+    allowed_public_cidrs: tuple[str, ...] = ()
     scan_ports: tuple[int, ...] = DEFAULT_PORTS
     scan_interval_seconds: int = 300
     connect_timeout_seconds: float = 0.35
@@ -126,6 +150,9 @@ class Settings:
             port=int(os.getenv("FINDAI_PORT", "7070")),
             db_path=Path(os.getenv("FINDAI_DB_PATH", "data/findai.db")),
             scan_cidrs=cidrs or infer_local_cidrs(),
+            allowed_public_cidrs=parse_allowed_public_cidrs(
+                os.getenv("FINDAI_ALLOWED_PUBLIC_CIDRS")
+            ),
             scan_ports=parse_ports(os.getenv("FINDAI_SCAN_PORTS")),
             scan_interval_seconds=int(os.getenv("FINDAI_SCAN_INTERVAL", "300")),
             connect_timeout_seconds=float(os.getenv("FINDAI_CONNECT_TIMEOUT", "0.35")),

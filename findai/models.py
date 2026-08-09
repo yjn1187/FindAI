@@ -45,6 +45,13 @@ class ProbeResult:
 
 
 @dataclass(slots=True)
+class ScanLogEntry:
+    timestamp: float
+    level: str
+    message: str
+
+
+@dataclass(slots=True)
 class ScanState:
     status: str = "idle"
     cidrs: list[str] = field(default_factory=list)
@@ -56,9 +63,9 @@ class ScanState:
     started_at: float | None = None
     finished_at: float | None = None
     error: str | None = None
+    logs: list[ScanLogEntry] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)
         data["progress"] = round(self.scanned / self.total * 100, 1) if self.total else 0.0
         return data
-

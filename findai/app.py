@@ -87,6 +87,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.gateway = gateway
     app.state.http_client = client
 
+    @app.middleware("http")
+    async def disable_dashboard_cache(request: Request, call_next):
+        response = await call_next(request)
+        if (
+            request.url.path == "/"
+            or request.url.path.startswith("/assets/")
+            or request.url.path == "/api/scan"
+        ):
+            response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+            response.headers["Pragma"] = "no-cache"
+            response.headers["Expires"] = "0"
+        return response
+
     web_dir = Path(__file__).resolve().parent / "web"
     app.mount("/assets", StaticFiles(directory=web_dir), name="assets")
 
@@ -135,6 +148,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             item["credential_loaded"] = bool(discovery.credential_for(service))
             services.append(item)
         return {"data": services}
+
+    @app.delete("/api/services", dependencies=[Depends(require_admin)])
+    async def clear_services() -> dict[str, int]:
+        if discovery.state.status == "running":
+            raise HTTPException(status_code=409, detail="扫描进行中，暂时不能清空服务列表")
+        deleted = store.clear()
+        discovery.clear_credentials()
+        return {"deleted": deleted}
 
     @app.get("/api/scan", dependencies=[Depends(require_admin)])
     async def scan_status() -> dict[str, Any]:

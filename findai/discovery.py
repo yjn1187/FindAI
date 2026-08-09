@@ -5,17 +5,30 @@ import json
 import logging
 import time
 from collections.abc import Iterable
+from dataclasses import dataclass
 from ipaddress import IPv4Address, IPv4Network
+from math import ceil
 from urllib.parse import urlsplit
 
 import httpx
 
 from .config import Settings
-from .models import ProbeResult, ScanState, ServiceRecord, service_id_for
+from .models import ProbeResult, ScanLogEntry, ScanState, ServiceRecord, service_id_for
 from .storage import ServiceStore
 
 
 logger = logging.getLogger(__name__)
+SCAN_LOG_LIMIT = 200
+
+
+@dataclass(slots=True)
+class _RangeScanProgress:
+    total: int
+    thresholds: tuple[int, ...]
+    scanned: int = 0
+    open_ports: int = 0
+    services: int = 0
+    threshold_index: int = 0
 
 
 def _model_ids(payload: object, key: str) -> list[str]:
@@ -171,6 +184,17 @@ class DiscoveryManager:
     def set_credential(self, service_id: str, api_key: str) -> None:
         self._credentials[service_id] = api_key
 
+    def clear_credentials(self) -> None:
+        self._credentials.clear()
+
+    def _record_scan_log(self, message: str, level: str = "info") -> None:
+        self.state.logs.append(
+            ScanLogEntry(timestamp=time.time(), level=level, message=message)
+        )
+        if len(self.state.logs) > SCAN_LOG_LIMIT:
+            del self.state.logs[:-SCAN_LOG_LIMIT]
+        logger.info("Scan event level=%s message=%s", level, message)
+
     def credential_for(self, service: ServiceRecord | str, service_id: str | None = None) -> str | None:
         if isinstance(service, ServiceRecord):
             base_url, identifier = service.base_url, service.id
@@ -182,13 +206,31 @@ class DiscoveryManager:
 
     @staticmethod
     def validate_targets(
-        cidrs: Iterable[str], ports: Iterable[int], schemes: Iterable[str], max_hosts: int
+        cidrs: Iterable[str],
+        ports: Iterable[int],
+        schemes: Iterable[str],
+        max_hosts: int,
+        allowed_public_cidrs: Iterable[str] = (),
     ) -> tuple[list[IPv4Network], list[int], list[str]]:
+        allowed_public_networks: list[IPv4Network] = []
+        for value in allowed_public_cidrs:
+            allowed = IPv4Network(value, strict=False)
+            if allowed.prefixlen != 32 or not allowed.network_address.is_global:
+                raise ValueError("Allowed public scan targets must be public IPv4 /32 hosts")
+            allowed_public_networks.append(allowed)
+
         networks: list[IPv4Network] = []
         for value in cidrs:
             network = IPv4Network(value, strict=False)
-            if not (network.network_address.is_private or network.network_address.is_loopback):
-                raise ValueError(f"Only private or loopback IPv4 networks may be scanned: {network}")
+            is_local = network.network_address.is_private or network.network_address.is_loopback
+            is_explicitly_allowed = any(
+                network.subnet_of(allowed) for allowed in allowed_public_networks
+            )
+            if not (is_local or is_explicitly_allowed):
+                raise ValueError(
+                    "Only private or loopback IPv4 networks may be scanned unless explicitly "
+                    f"allowed by FINDAI_ALLOWED_PUBLIC_CIDRS: {network}"
+                )
             networks.append(network)
         if not networks:
             raise ValueError("At least one CIDR is required")
@@ -214,16 +256,24 @@ class DiscoveryManager:
         except (TimeoutError, OSError):
             return False
 
-    async def _probe_target(self, host: str, port: int, scheme: str) -> str | None:
+    async def _probe_target(self, host: str, port: int, scheme: str) -> tuple[str | None, bool]:
         if not await self._tcp_open(host, port):
-            return None
+            return None, False
         self.state.open_ports += 1
         base_url = f"{scheme}://{host}:{port}"
+        self._record_scan_log(
+            f"TCP 端口开放：{base_url}；请求 GET /v1/models，未匹配时继续 GET /api/tags",
+            "open",
+        )
         identifier = service_id_for(base_url)
         result = await self.prober.probe(base_url, self.credential_for(base_url, identifier))
         if not result.matched:
             logger.debug("Open port is not a compatible model API base_url=%s error=%s", base_url, result.error)
-            return None
+            self._record_scan_log(
+                f"未识别模型服务：{base_url}；已尝试 /v1/models 与 /api/tags",
+                "info",
+            )
+            return None, True
         name = f"{result.name} · {host}:{port}"
         service = ServiceRecord(
             id=identifier,
@@ -249,7 +299,14 @@ class DiscoveryManager:
             service.auth_required,
             round(service.latency_ms, 1) if service.latency_ms is not None else None,
         )
-        return base_url
+        endpoint = "/api/tags" if result.capabilities.get("native_ollama") else "/v1/models"
+        auth_note = " · 需要 API Key" if result.auth_required else ""
+        self._record_scan_log(
+            f"命中模型服务：{base_url} · {result.api_kind} · {len(result.models)} 个模型"
+            f"{auth_note} · 来源 GET {endpoint}",
+            "success",
+        )
+        return base_url, True
 
     async def _run_scan(
         self, networks: list[IPv4Network], ports: list[int], schemes: list[str]
@@ -262,12 +319,24 @@ class DiscoveryManager:
             and service.port in ports
             and service.scheme in schemes
         }
-        queue: asyncio.Queue[tuple[str, int, str] | None] = asyncio.Queue()
+        queue: asyncio.Queue[
+            tuple[str, int, str, tuple[str, int, str]] | None
+        ] = asyncio.Queue()
+        range_progress: dict[tuple[str, int, str], _RangeScanProgress] = {}
         for network in networks:
-            for address in network.hosts():
-                for port in ports:
-                    for scheme in schemes:
-                        queue.put_nowait((str(address), port, scheme))
+            addresses = [str(address) for address in network.hosts()]
+            for port in ports:
+                for scheme in schemes:
+                    range_key = (str(network), port, scheme)
+                    thresholds = tuple(sorted({
+                        max(1, ceil(len(addresses) * fraction))
+                        for fraction in (0.25, 0.5, 0.75, 1.0)
+                    }))
+                    range_progress[range_key] = _RangeScanProgress(
+                        total=len(addresses), thresholds=thresholds
+                    )
+                    for address in addresses:
+                        queue.put_nowait((address, port, scheme, range_key))
 
         async def worker() -> None:
             while True:
@@ -275,23 +344,42 @@ class DiscoveryManager:
                 if target is None:
                     queue.task_done()
                     return
+                host, port, scheme, range_key = target
+                progress = range_progress[range_key]
                 try:
-                    found = await self._probe_target(*target)
+                    found, open_port = await self._probe_target(host, port, scheme)
+                    if open_port:
+                        progress.open_ports += 1
                     if found:
                         alive.add(found)
+                        progress.services += 1
                         self.state.discovered = len(alive)
                 except Exception as exc:
                     # A malformed response from one host must not strand the
                     # worker queue or abort the rest of the LAN scan.
                     logger.warning(
                         "Target probe raised an unexpected error host=%s port=%d scheme=%s error=%s",
-                        target[0],
-                        target[1],
-                        target[2],
+                        host,
+                        port,
+                        scheme,
                         exc,
                     )
                 finally:
+                    progress.scanned += 1
                     self.state.scanned += 1
+                    while (
+                        progress.threshold_index < len(progress.thresholds)
+                        and progress.scanned >= progress.thresholds[progress.threshold_index]
+                    ):
+                        completed = progress.scanned >= progress.total
+                        label = "范围完成" if completed else "范围进度"
+                        self._record_scan_log(
+                            f"{label}：{range_key[0]} · {range_key[2]}:{range_key[1]} · "
+                            f"{progress.scanned}/{progress.total} 地址；开放 "
+                            f"{progress.open_ports}，服务 {progress.services}",
+                            "active" if completed else "progress",
+                        )
+                        progress.threshold_index += 1
                     queue.task_done()
 
         workers = [
@@ -309,6 +397,11 @@ class DiscoveryManager:
             self.store.reconcile(known_in_scope, alive)
             self.state.discovered = len(alive)
             self.state.status = "completed"
+            self._record_scan_log(
+                f"扫描完成：检查 {self.state.scanned} 个目标，开放 "
+                f"{self.state.open_ports} 个端口，发现 {self.state.discovered} 个模型服务",
+                "success",
+            )
             logger.info(
                 "LAN scan completed scanned=%d open_ports=%d discovered=%d duration_seconds=%.2f",
                 self.state.scanned,
@@ -318,12 +411,14 @@ class DiscoveryManager:
             )
         except asyncio.CancelledError:
             self.state.status = "cancelled"
+            self._record_scan_log("扫描已取消", "error")
             for worker_task in workers:
                 worker_task.cancel()
             raise
         except Exception as exc:  # keep the scheduler alive after one failed scan
             self.state.status = "failed"
             self.state.error = str(exc)
+            self._record_scan_log(f"扫描失败：{exc}", "error")
             logger.exception("LAN scan failed")
         finally:
             self.state.finished_at = time.time()
@@ -341,6 +436,7 @@ class DiscoveryManager:
             ports or self.settings.scan_ports,
             schemes or ("http",),
             self.settings.max_hosts,
+            self.settings.allowed_public_cidrs,
         )
         total_addresses = sum(sum(1 for _ in network.hosts()) for network in networks)
         total_targets = total_addresses * len(normalized_ports) * len(normalized_schemes)
@@ -355,6 +451,16 @@ class DiscoveryManager:
             ports=normalized_ports,
             total=total_targets,
             started_at=time.time(),
+        )
+        self._record_scan_log(
+            f"开始扫描：{', '.join(self.state.cidrs)} · {len(normalized_ports)} 个端口 · "
+            f"{total_targets} 个目标",
+            "active",
+        )
+        self._record_scan_log(
+            "探测流程：TCP 连接 → GET /v1/models → 未匹配时 GET /api/tags；"
+            "关闭端口仅计入范围汇总，不逐条记录",
+            "info",
         )
         logger.info(
             "LAN scan started cidrs=%s ports=%s schemes=%s targets=%d concurrency=%d",
@@ -417,13 +523,23 @@ class DiscoveryManager:
             )}
         except OSError as exc:
             raise ValueError(f"Unable to resolve host: {parts.hostname}") from exc
+        allowed_public_networks = [
+            IPv4Network(value, strict=False) for value in self.settings.allowed_public_cidrs
+        ]
         if not addresses or any(
-            not (IPv4Address(address).is_private or IPv4Address(address).is_loopback)
+            not (
+                IPv4Address(address).is_private
+                or IPv4Address(address).is_loopback
+                or any(IPv4Address(address) in network for network in allowed_public_networks)
+            )
             for address in addresses
         ):
-            raise ValueError("Manual services must resolve only to private or loopback IPv4 addresses")
-        # Pin the validated private address to prevent a later DNS change from
-        # turning a registered hostname into a proxy target outside the LAN.
+            raise ValueError(
+                "Manual services must resolve only to private, loopback, or explicitly allowed "
+                "public IPv4 addresses"
+            )
+        # Pin the validated address to prevent a later DNS change from turning
+        # a registered hostname into a proxy target outside the approved set.
         pinned_address = sorted(addresses)[0]
         normalized = f"{parts.scheme}://{pinned_address}:{port}"
         identifier = service_id_for(normalized)

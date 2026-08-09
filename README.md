@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/assets/findai-icon-concept-v4-radar-service-rounded-shadow.png" alt="FindAI" width="240">
+</p>
+
 # FindAI
 
 FindAI 是一个面向家庭、工作室和小型机房的“局域网模型服务发现 + 注册表 + OpenAI 兼容网关”。它会扫描指定私网网段和端口，读取模型服务的公开指纹，将发现结果持久化，然后用一个稳定的 `/v1` 地址向 Dify、Open WebUI、LibreChat、LangChain 等上层系统提供模型。
@@ -73,6 +77,15 @@ $env:FINDAI_ENV_FILE = 'D:\Config\findai.env'
 
 扫描其他设备前，需要确保模型服务器监听局域网接口，而非仅监听它自己的 `127.0.0.1`，并允许对应端口通过主机防火墙。
 
+如果校园网或单位网络使用公网可路由地址，FindAI 默认仍会拒绝扫描。确认目标可信后，必须在 `.env` 中逐台使用 `/32` 显式放行，例如：
+
+```env
+FINDAI_SCAN_CIDRS=121.48.164.135/32
+FINDAI_ALLOWED_PUBLIC_CIDRS=121.48.164.135/32
+```
+
+为避免误扫公网，`FINDAI_ALLOWED_PUBLIC_CIDRS` 不接受 `/24` 等网段，只接受单主机 `/32`。
+
 ## 接入上层系统
 
 把上层系统的 OpenAI Base URL 设置为：
@@ -110,6 +123,7 @@ Invoke-RestMethod -Method Post `
 | `FINDAI_HOST` | `127.0.0.1` | 监听地址；向局域网提供网关时改为 `0.0.0.0` |
 | `FINDAI_PORT` | `7070` | 管理界面和网关端口 |
 | `FINDAI_SCAN_CIDRS` | 自动推断 | 逗号分隔的私网 IPv4 CIDR |
+| `FINDAI_ALLOWED_PUBLIC_CIDRS` | 空 | 显式信任的公网 IPv4 单主机列表，只允许 `/32` |
 | `FINDAI_SCAN_PORTS` | 常见端口集合 | 支持 `8000-8010` 形式的小范围端口段 |
 | `FINDAI_SCAN_INTERVAL` | `300` | 自动重扫间隔，秒 |
 | `FINDAI_MAX_HOSTS` | `1024` | 单次扫描允许展开的最大 IP 数 |

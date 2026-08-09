@@ -155,7 +155,11 @@ class ServiceStore:
                 [(base_url,) for base_url in offline],
             )
 
+    def clear(self) -> int:
+        with self._lock, self._connection:
+            cursor = self._connection.execute("DELETE FROM services")
+        return max(cursor.rowcount, 0)
+
     def close(self) -> None:
         with self._lock:
             self._connection.close()
-

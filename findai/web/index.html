@@ -5,10 +5,11 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="dark light">
   <title>FindAI · 局域网模型发现</title>
+  <link rel="icon" type="image/png" sizes="64x64" href="/assets/favicon.png?v=20260810-5">
   <script>
     try { document.documentElement.dataset.theme = localStorage.getItem("findai-theme") || "tech"; } catch (_) {}
   </script>
-  <link rel="stylesheet" href="/assets/styles.css">
+  <link rel="stylesheet" href="/assets/styles.css?v=20260810-5">
 </head>
 <body>
   <div class="ambient ambient-a"></div>
@@ -20,27 +21,37 @@
       <span><strong>FindAI</strong><small>LAN MODEL DISCOVERY</small></span>
     </a>
     <div class="top-actions">
+      <button id="open-manual" class="quick-add" type="button" aria-controls="manual-dialog" title="手工添加模型节点">
+        <svg aria-hidden="true" viewBox="0 0 24 24" focusable="false">
+          <rect x="4" y="4" width="12" height="16" rx="3"></rect>
+          <path d="M7 9h6M7 13h4M18 13v6M15 16h6"></path>
+        </svg>
+        <span>添加节点</span>
+      </button>
       <div class="theme-switch" role="group" aria-label="页面主题">
         <button type="button" data-theme-option="tech">科技感</button>
         <button type="button" data-theme-option="light">蓝白简约</button>
       </div>
-      <div class="auth-box">
-        <label for="gateway-key">访问密钥</label>
-        <input id="gateway-key" type="password" autocomplete="off" placeholder="未启用可留空">
-        <button id="save-key" class="button ghost">保存</button>
-      </div>
+      <button id="open-key" class="header-icon-button" type="button" aria-controls="key-dialog" aria-label="常用访问密钥" title="常用访问密钥">
+        <svg aria-hidden="true" viewBox="0 0 24 24" focusable="false">
+          <circle cx="8" cy="15" r="4"></circle>
+          <path d="M11 12l8-8M15 8l3 3M17 6l2 2"></path>
+        </svg>
+      </button>
     </div>
   </header>
 
   <main>
-    <div id="notice" class="notice hidden"></div>
+    <div id="notice" class="notice hidden" popover="manual" role="status" aria-live="polite"></div>
 
     <section class="scan-spotlight">
       <div class="scan-heading">
-        <div>
-          <p class="kicker"><span class="live-dot"></span>DISCOVERY CONTROL</p>
-          <h1>局域网模型扫描</h1>
-          <p>填写要扫描的网段和模型服务端口，FindAI 将识别 OpenAI 兼容 API 与 Ollama 服务。</p>
+        <div class="scan-heading-copy">
+          <div class="scan-title-line">
+            <h1>局域网模型扫描</h1>
+            <span class="kicker"><i class="live-dot"></i>DISCOVERY CONTROL</span>
+          </div>
+          <p>识别局域网内的 OpenAI 兼容 API 与 Ollama 模型服务。</p>
         </div>
         <span id="scan-status" class="status-pill idle">空闲</span>
       </div>
@@ -49,8 +60,8 @@
         <div class="scan-form">
           <div class="scan-fields">
             <label>IPv4 网段
-              <input id="scan-cidrs" placeholder="192.168.110.0/24">
-              <small>多个网段用逗号分隔</small>
+              <input id="scan-cidrs" placeholder="192.168.110.0/24 或 192.168.110.8">
+              <small>多个目标用逗号分隔；单个 IP 自动补 /32</small>
             </label>
             <label>模型服务端口
               <input id="scan-ports" placeholder="11434,12434,1234,8000-8001">
@@ -78,16 +89,33 @@
           </div>
         </div>
       </div>
-      <div id="scan-feedback" class="scan-feedback hidden" role="status" aria-live="polite">
-        <span id="scan-feedback-icon" class="feedback-icon">✓</span>
-        <div><strong id="scan-feedback-title">扫描完成</strong><p id="scan-feedback-text"></p></div>
+      <div class="scan-live-panel" aria-live="polite">
+        <div class="scan-live-heading">
+          <span><i class="live-dot"></i>扫描日志</span>
+          <div class="scan-live-actions">
+            <small id="scan-live-summary">尚未开始扫描</small>
+            <button id="open-scan-log" class="scan-log-trigger" type="button" aria-controls="scan-log-dialog" aria-label="查看本次完整扫描日志" title="查看本次完整扫描日志">
+              <svg aria-hidden="true" viewBox="0 0 24 24" focusable="false">
+                <path d="M7 4h10M7 9h10M7 14h7M5 4h.01M5 9h.01M5 14h.01"></path>
+                <path d="M15 18h5M18 15l3 3-3 3"></path>
+              </svg>
+              <span id="scan-log-count" class="scan-log-count">0</span>
+            </button>
+          </div>
+        </div>
+        <ol id="scan-events" class="scan-events">
+          <li class="muted"><span>开始扫描后，这里显示最新一条日志。</span></li>
+        </ol>
       </div>
     </section>
 
     <section class="services-section">
       <div class="section-heading">
         <div><span class="kicker">SERVICE REGISTRY</span><h2>扫描结果与模型服务</h2></div>
-        <button id="refresh" class="button ghost">刷新列表</button>
+        <div class="section-actions">
+          <button id="clear-services" class="button danger-ghost">清空列表</button>
+          <button id="refresh" class="button ghost">刷新列表</button>
+        </div>
       </div>
       <div id="services" class="service-list">
         <div class="empty-state"><span class="empty-radar"></span><h3>还没有发现模型服务</h3><p>请在上方配置网段并开始扫描，或手工添加已知服务。</p></div>
@@ -116,29 +144,73 @@
       </div>
     </section>
 
-    <section class="manual-section panel">
+  </main>
+
+  <dialog id="manual-dialog" class="manual-dialog" aria-labelledby="manual-dialog-title">
+    <div class="manual-dialog-card">
+      <button id="close-manual" class="dialog-close" type="button" aria-label="关闭">×</button>
       <div class="manual-copy">
         <span class="kicker">MANUAL ENTRY</span>
-        <h2>手工添加模型节点</h2>
+        <h2 id="manual-dialog-title">手工添加模型节点</h2>
         <p>用于自定义端口、HTTPS，或必须携带 API Key 才能返回模型列表的服务。</p>
       </div>
-      <div class="manual-form">
+      <div class="manual-form dialog-form">
         <label>服务根地址
           <input id="manual-url" placeholder="http://192.168.110.241:12434/v1">
         </label>
         <label>上游 API Key（可选，仅存内存）
           <input id="manual-key" type="password" autocomplete="off" placeholder="输入上游服务密钥">
         </label>
-        <button id="add-manual" class="button secondary">验证并添加</button>
+        <button id="add-manual" class="button secondary" type="button">验证并添加</button>
       </div>
-    </section>
+    </div>
+  </dialog>
 
-  </main>
+  <dialog id="key-dialog" class="manual-dialog key-dialog" aria-labelledby="key-dialog-title">
+    <div class="manual-dialog-card">
+      <button id="close-key" class="dialog-close" type="button" aria-label="关闭">×</button>
+      <div class="manual-copy">
+        <span class="kicker">ACCESS KEY</span>
+        <h2 id="key-dialog-title">常用访问密钥</h2>
+        <p>可保存多条密钥并切换当前使用项。密钥仅保存在当前浏览器中，用于访问启用了网关鉴权的 FindAI 管理与代理接口。</p>
+      </div>
+      <div class="key-form">
+        <label>名称（可选）
+          <input id="gateway-key-name" autocomplete="off" maxlength="60" placeholder="例如：家中 / 工作室">
+        </label>
+        <label>FindAI 访问密钥
+          <input id="gateway-key" type="password" autocomplete="off" maxlength="4096" placeholder="输入要保存的密钥">
+        </label>
+        <button id="save-key" class="button secondary" type="button">添加并使用</button>
+      </div>
+      <div class="key-list-section">
+        <div class="key-list-heading">
+          <h3>已保存密钥</h3>
+          <button id="clear-active-key" class="button ghost" type="button">当前不使用密钥</button>
+        </div>
+        <div id="saved-keys" class="key-list" aria-live="polite"></div>
+      </div>
+    </div>
+  </dialog>
+
+  <dialog id="scan-log-dialog" class="manual-dialog scan-log-dialog" aria-labelledby="scan-log-dialog-title">
+    <div class="manual-dialog-card">
+      <button id="close-scan-log" class="dialog-close" type="button" aria-label="关闭">×</button>
+      <div class="manual-copy scan-log-dialog-heading">
+        <span class="kicker">SCAN REQUEST LOG</span>
+        <h2 id="scan-log-dialog-title">本次完整扫描日志</h2>
+        <p id="scan-log-dialog-summary">尚未开始扫描</p>
+      </div>
+      <ol id="scan-log-dialog-events" class="scan-log-list">
+        <li class="muted"><span>开始扫描后，这里会实时显示本次扫描的完整日志。</span></li>
+      </ol>
+    </div>
+  </dialog>
 
   <footer>
     <span>FindAI 0.1 · local-first model infrastructure</span>
     <a href="/docs" target="_blank" rel="noreferrer">API 文档 ↗</a>
   </footer>
-  <script src="/assets/app.js" defer></script>
+  <script src="/assets/app.js?v=20260810-5" defer></script>
 </body>
 </html>
