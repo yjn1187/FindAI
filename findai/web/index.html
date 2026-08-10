@@ -32,7 +32,7 @@
         <button type="button" data-theme-option="tech">科技感</button>
         <button type="button" data-theme-option="light">蓝白简约</button>
       </div>
-      <button id="open-key" class="header-icon-button" type="button" aria-controls="key-dialog" aria-label="常用访问密钥" title="常用访问密钥">
+      <button id="open-key" class="header-icon-button" type="button" aria-controls="key-dialog" aria-label="常用密钥" title="常用密钥">
         <svg aria-hidden="true" viewBox="0 0 24 24" focusable="false">
           <circle cx="8" cy="15" r="4"></circle>
           <path d="M11 12l8-8M15 8l3 3M17 6l2 2"></path>
@@ -166,27 +166,53 @@
     </div>
   </dialog>
 
+  <dialog id="credential-dialog" class="manual-dialog compact-dialog" aria-labelledby="credential-dialog-title">
+    <div class="manual-dialog-card">
+      <button id="close-credential" class="dialog-close" type="button" aria-label="关闭">×</button>
+      <div class="manual-copy">
+        <span class="kicker">UPSTREAM CREDENTIAL</span>
+        <h2 id="credential-dialog-title">填写模型服务密钥</h2>
+        <p id="credential-service-summary">选择需要鉴权的模型服务。</p>
+        <p>可从当前浏览器保存的常用密钥快速填充；提交后，上游密钥只加载到当前 FindAI 进程内存。</p>
+      </div>
+      <div class="credential-form dialog-form">
+        <label>从常用密钥填充
+          <select id="credential-saved-key">
+            <option value="">暂无常用密钥，请手工输入</option>
+          </select>
+        </label>
+        <label>上游 API Key
+          <input id="credential-key" type="password" autocomplete="off" maxlength="4096" placeholder="选择常用密钥或手工输入">
+        </label>
+        <button id="apply-credential" class="button secondary" type="button">加载密钥并复检</button>
+      </div>
+    </div>
+  </dialog>
+
   <dialog id="key-dialog" class="manual-dialog key-dialog" aria-labelledby="key-dialog-title">
     <div class="manual-dialog-card">
       <button id="close-key" class="dialog-close" type="button" aria-label="关闭">×</button>
       <div class="manual-copy">
-        <span class="kicker">ACCESS KEY</span>
-        <h2 id="key-dialog-title">常用访问密钥</h2>
-        <p>可保存多条密钥并切换当前使用项。密钥仅保存在当前浏览器中，用于访问启用了网关鉴权的 FindAI 管理与代理接口。</p>
+        <span class="kicker">COMMON KEYS</span>
+        <h2 id="key-dialog-title">常用密钥</h2>
+        <p>密钥仅保存在当前浏览器中。可将其中一条用于 FindAI 管理与代理鉴权，也可在模型服务需要鉴权时选择并快速填充。</p>
       </div>
       <div class="key-form">
         <label>名称（可选）
           <input id="gateway-key-name" autocomplete="off" maxlength="60" placeholder="例如：家中 / 工作室">
         </label>
-        <label>FindAI 访问密钥
+        <label>密钥
           <input id="gateway-key" type="password" autocomplete="off" maxlength="4096" placeholder="输入要保存的密钥">
         </label>
-        <button id="save-key" class="button secondary" type="button">添加并使用</button>
+        <div class="key-form-actions">
+          <button id="save-key-only" class="button ghost" type="button">仅保存</button>
+          <button id="save-key" class="button secondary" type="button">保存并用于 FindAI</button>
+        </div>
       </div>
       <div class="key-list-section">
         <div class="key-list-heading">
           <h3>已保存密钥</h3>
-          <button id="clear-active-key" class="button ghost" type="button">当前不使用密钥</button>
+          <button id="clear-active-key" class="button ghost" type="button">FindAI 不使用密钥</button>
         </div>
         <div id="saved-keys" class="key-list" aria-live="polite"></div>
       </div>
@@ -208,7 +234,7 @@
   </dialog>
 
   <footer>
-    <span>FindAI 0.1 · local-first model infrastructure</span>
+    <span>FindAI 1.0 · local-first model infrastructure</span>
     <a href="/docs" target="_blank" rel="noreferrer">API 文档 ↗</a>
   </footer>
   <script src="/assets/app.js?v=20260810-5" defer></script>

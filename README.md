@@ -45,7 +45,7 @@ OpenAI 官方 OpenAPI 规范将模型清单定义为 `GET /v1/models`，响应�
 - 通用 JSON `POST /v1/*` 模型路由，因此可转发 Chat Completions、Embeddings、Completions 和上游已实现的 Responses 等接口。
 - Chat Completions SSE 流式透传。
 - 原生 Ollama `/api/chat` 到 OpenAI Chat Completions 的非流式与流式适配。
-- 上游 Key 可通过环境变量提供，或在网页中临时加载到进程内存；网页不会回显 Key。
+- 上游 Key 可通过环境变量提供，或从浏览器常用密钥中选择并临时加载到进程内存；网页列表不会回显 Key。
 - 私网目标校验、最大扫描主机数、并发数和短连接超时限制。
 - 自带中文管理控制台和 FastAPI `/docs` 接口文档。
 

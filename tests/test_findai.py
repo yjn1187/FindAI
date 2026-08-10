@@ -257,7 +257,67 @@ class GatewayApiTests(unittest.IsolatedAsyncioTestCase):
                     response = await client.get(path)
                     self.assertEqual(response.status_code, 200)
                     self.assertIn("no-store", response.headers["cache-control"])
+                dashboard = await client.get("/")
+                self.assertIn('id="credential-dialog"', dashboard.text)
+                self.assertIn('id="credential-saved-key"', dashboard.text)
+                self.assertIn("FindAI 1.0 · local-first model infrastructure", dashboard.text)
+                script = await client.get("/assets/app.js")
+                self.assertIn("serviceRevealDelay", script.text)
+                self.assertIn("renderCredentialKeyOptions", script.text)
+                self.assertIn('service.credential_loaded ? "更换密钥" : "密钥"', script.text)
+                self.assertNotIn("window.prompt(", script.text)
         finally:
+            await app.state.http_client.aclose()
+            app.state.store.close()
+            temporary.cleanup()
+
+    async def test_service_credential_is_applied_and_refetches_models(self) -> None:
+        temporary = tempfile.TemporaryDirectory()
+        settings = Settings(
+            db_path=Path(temporary.name) / "app.db",
+            scan_cidrs=("127.0.0.1/32",),
+            scan_ports=(65534,),
+            scan_on_startup=False,
+        )
+        app = create_app(settings)
+        base_url = "http://10.0.0.21:8000"
+        service = ServiceRecord(
+            id=service_id_for(base_url),
+            name="Protected OpenAI service",
+            host="10.0.0.21",
+            port=8000,
+            scheme="http",
+            base_url=base_url,
+            api_kind="openai",
+            auth_required=True,
+        )
+        app.state.store.upsert(service)
+
+        def upstream_handler(request: httpx.Request) -> httpx.Response:
+            self.assertEqual(request.url.path, "/v1/models")
+            self.assertEqual(request.headers.get("authorization"), "Bearer common-upstream-key")
+            return httpx.Response(
+                200,
+                json={"object": "list", "data": [{"id": "secured-chat"}]},
+            )
+
+        upstream_client = httpx.AsyncClient(transport=httpx.MockTransport(upstream_handler))
+        app.state.discovery.prober.client = upstream_client
+        transport = httpx.ASGITransport(app=app)
+        try:
+            async with httpx.AsyncClient(transport=transport, base_url="http://findai.test") as client:
+                response = await client.put(
+                    f"/api/services/{service.id}/credential",
+                    json={"api_key": "common-upstream-key"},
+                )
+                self.assertEqual(response.status_code, 200)
+                payload = response.json()
+                self.assertTrue(payload["credential_loaded"])
+                self.assertEqual(payload["service"]["models"], ["secured-chat"])
+                services = await client.get("/api/services")
+                self.assertTrue(services.json()["data"][0]["credential_loaded"])
+        finally:
+            await upstream_client.aclose()
             await app.state.http_client.aclose()
             app.state.store.close()
             temporary.cleanup()

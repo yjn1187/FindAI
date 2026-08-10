@@ -7,6 +7,13 @@ const $ = (selector) => document.querySelector(selector);
 let noticeTimer = null;
 let scanPollTimer = null;
 let pollBusy = false;
+const serviceReveal = {
+  visibleIds: new Set(),
+  queuedIds: new Set(),
+  queue: [],
+  timer: null,
+};
+const prefersReducedMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches || false;
 
 function emptyScanState() {
   return {
@@ -104,21 +111,21 @@ function updateKeyIndicator() {
   if (!button) return;
   const current = activeAccessKey();
   button.classList.toggle("has-key", Boolean(current));
-  button.title = current ? `常用访问密钥：${current.name}` : "常用访问密钥";
+  button.title = current ? `常用密钥：${current.name}（FindAI 使用中）` : "常用密钥";
 }
 
 function renderAccessKeys() {
   const list = $("#saved-keys");
   if (!list) return;
   if (!accessKeys.length) {
-    list.innerHTML = '<div class="key-empty">尚未保存密钥，可在上方一次添加多条并随时切换。</div>';
+    list.innerHTML = '<div class="key-empty">尚未保存常用密钥。保存后既可用于 FindAI 访问，也可为上游模型服务快速填充。</div>';
   } else {
     list.innerHTML = accessKeys.map((item) => {
       const active = item.id === activeAccessKeyId;
       return `<div class="key-item${active ? " active" : ""}">
         <div class="key-item-copy"><strong>${escapeHtml(item.name)}</strong><code>${escapeHtml(maskAccessKey(item.value))}</code></div>
         <div class="key-item-actions">
-          ${active ? '<span class="key-active">使用中</span>' : `<button class="button ghost" type="button" data-use-key="${escapeHtml(item.id)}">使用</button>`}
+          ${active ? '<span class="key-active">FindAI 使用中</span>' : `<button class="button ghost" type="button" data-use-key="${escapeHtml(item.id)}">用于 FindAI</button>`}
           <button class="button danger-ghost" type="button" data-delete-key="${escapeHtml(item.id)}">删除</button>
         </div>
       </div>`;
@@ -126,6 +133,19 @@ function renderAccessKeys() {
   }
   $("#clear-active-key").disabled = !activeAccessKey();
   updateKeyIndicator();
+  renderCredentialKeyOptions();
+}
+
+function renderCredentialKeyOptions() {
+  const select = $("#credential-saved-key");
+  if (!select) return;
+  const previous = select.value;
+  const prompt = accessKeys.length ? "手工输入上游密钥" : "暂无常用密钥，请手工输入";
+  select.innerHTML = `<option value="">${prompt}</option>${accessKeys.map((item) => (
+    `<option value="${escapeHtml(item.id)}">${escapeHtml(item.name)} · ${escapeHtml(maskAccessKey(item.value))}</option>`
+  )).join("")}`;
+  select.disabled = !accessKeys.length;
+  if (accessKeys.some((item) => item.id === previous)) select.value = previous;
 }
 
 function headers(extra = {}) {
@@ -260,13 +280,15 @@ function renderScan(scan) {
   }
 }
 
-function renderServices(services) {
-  state.services = services;
+function renderServiceMetrics(services) {
   const online = services.filter((item) => item.status === "online");
   const modelCount = online.reduce((count, item) => count + item.models.length, 0);
   $("#metric-services").textContent = services.length;
   $("#metric-models").textContent = modelCount;
   $("#metric-online").textContent = services.length ? `${Math.round(online.length / services.length * 100)}%` : "—";
+}
+
+function renderServiceCards(services, enteringId = "") {
   if (!services.length) {
     $("#services").innerHTML = '<div class="empty-state"><span class="empty-radar"></span><h3>还没有发现模型服务</h3><p>配置网段后开始扫描，或手工添加一个已知地址。</p></div>';
     return;
@@ -276,12 +298,12 @@ function renderServices(services) {
       ? service.routed_models.map((model) => `<span class="model-chip" title="${escapeHtml(model)}">${escapeHtml(model)}<button data-copy="${escapeHtml(model)}">复制</button></span>`).join("")
       : `<span class="model-chip">${service.auth_required ? "需要 API Key 后读取模型" : "未上报模型"}</span>`;
     const latency = service.latency_ms == null ? "—" : `${Math.round(service.latency_ms)} ms`;
-    return `<article class="service-card">
+    return `<article class="service-card${service.id === enteringId ? " entering" : ""}">
       <div class="service-main"><span class="node-icon"></span><div><h3>${escapeHtml(service.name)}</h3><code>${escapeHtml(service.base_url)}</code></div></div>
       <div class="service-meta"><span>状态 / 协议</span><strong><i class="${service.status === "online" ? "online-dot" : "offline-dot"}"></i>${service.status === "online" ? "在线" : "离线"} · ${escapeHtml(service.api_kind)}</strong></div>
       <div class="model-summary"><span>模型 / 延迟</span><strong>${service.models.length} 个 · ${latency}</strong></div>
       <div class="card-actions">
-        ${service.auth_required || !service.credential_loaded ? `<button class="button ghost" data-credential="${service.id}">密钥</button>` : ""}
+        <button class="button ghost" data-credential="${service.id}">${service.credential_loaded ? "更换密钥" : "密钥"}</button>
         <button class="button ghost" data-probe="${service.id}">复检</button>
       </div>
       <div class="models-detail">${models}</div>
@@ -289,10 +311,70 @@ function renderServices(services) {
   }).join("");
 }
 
-async function refreshServices() {
+function stopServiceReveal(clearQueue = false) {
+  if (serviceReveal.timer) window.clearTimeout(serviceReveal.timer);
+  serviceReveal.timer = null;
+  if (clearQueue) {
+    serviceReveal.queue = [];
+    serviceReveal.queuedIds.clear();
+  }
+}
+
+function serviceRevealDelay() {
+  if (serviceReveal.queue.length > 24) return 70;
+  if (serviceReveal.queue.length > 12) return 90;
+  if (serviceReveal.queue.length > 5) return 120;
+  return 170;
+}
+
+function revealNextService() {
+  serviceReveal.timer = null;
+  let serviceId = "";
+  while (serviceReveal.queue.length && !serviceId) {
+    const candidate = serviceReveal.queue.shift();
+    serviceReveal.queuedIds.delete(candidate);
+    if (state.services.some((service) => service.id === candidate)) serviceId = candidate;
+  }
+  if (!serviceId) return;
+  serviceReveal.visibleIds.add(serviceId);
+  renderServiceCards(
+    state.services.filter((service) => serviceReveal.visibleIds.has(service.id)),
+    serviceId,
+  );
+  if (serviceReveal.queue.length) {
+    serviceReveal.timer = window.setTimeout(revealNextService, serviceRevealDelay());
+  }
+}
+
+function renderServices(services, { animateNew = false } = {}) {
+  state.services = services;
+  renderServiceMetrics(services);
+  const availableIds = new Set(services.map((service) => service.id));
+  serviceReveal.visibleIds = new Set([...serviceReveal.visibleIds].filter((id) => availableIds.has(id)));
+  serviceReveal.queue = serviceReveal.queue.filter((id) => availableIds.has(id));
+  serviceReveal.queuedIds = new Set(serviceReveal.queue);
+
+  if (!animateNew || prefersReducedMotion) {
+    stopServiceReveal(true);
+    serviceReveal.visibleIds = availableIds;
+    renderServiceCards(services);
+    return;
+  }
+
+  services.forEach((service) => {
+    if (!serviceReveal.visibleIds.has(service.id) && !serviceReveal.queuedIds.has(service.id)) {
+      serviceReveal.queue.push(service.id);
+      serviceReveal.queuedIds.add(service.id);
+    }
+  });
+  renderServiceCards(services.filter((service) => serviceReveal.visibleIds.has(service.id)));
+  if (!serviceReveal.timer && serviceReveal.queue.length) revealNextService();
+}
+
+async function refreshServices({ animateNew = false } = {}) {
   try {
     const services = await api("/api/services");
-    renderServices(services.data);
+    renderServices(services.data, { animateNew });
   } catch (error) { notify(error.message, true); }
 }
 
@@ -316,7 +398,9 @@ async function pollScan() {
     const scan = await api("/api/scan");
     const wasRunning = state.scan?.status === "running";
     renderScan(scan);
-    if (scan.status === "running" || wasRunning) await refreshServices();
+    if (scan.status === "running" || wasRunning) {
+      await refreshServices({ animateNew: true });
+    }
     if (scan.status === "running") scheduleScanPoll();
   } catch (_) {
     if (state.scan?.status === "running") scheduleScanPoll(1800);
@@ -347,15 +431,15 @@ async function initializeDashboard() {
   } catch (error) { notify(error.message, true); }
 }
 
-$("#save-key").addEventListener("click", async () => {
+async function saveCommonKey(activateForFindAI) {
   try {
     const value = $("#gateway-key").value.trim();
     const requestedName = $("#gateway-key-name").value.trim();
-    if (!value) throw new Error("请填写要保存的访问密钥");
+    if (!value) throw new Error("请填写要保存的密钥");
     const existing = accessKeys.find((item) => item.value === value);
     if (existing) {
       if (requestedName) existing.name = requestedName.slice(0, 60);
-      activeAccessKeyId = existing.id;
+      if (activateForFindAI) activeAccessKeyId = existing.id;
     } else {
       const item = {
         id: createAccessKeyId(),
@@ -363,16 +447,18 @@ $("#save-key").addEventListener("click", async () => {
         value: value.slice(0, 4096),
       };
       accessKeys.push(item);
-      activeAccessKeyId = item.id;
+      if (activateForFindAI) activeAccessKeyId = item.id;
     }
     persistAccessKeyring();
     $("#gateway-key-name").value = "";
     $("#gateway-key").value = "";
     renderAccessKeys();
-    notify("访问密钥已保存并设为当前使用项");
-    await initializeDashboard();
+    notify(activateForFindAI ? "密钥已保存并用于 FindAI 访问" : "常用密钥已保存");
+    if (activateForFindAI) await initializeDashboard();
   } catch (error) { notify(error.message, true); }
-});
+}
+$("#save-key").addEventListener("click", () => saveCommonKey(true));
+$("#save-key-only").addEventListener("click", () => saveCommonKey(false));
 document.querySelectorAll("[data-theme-option]").forEach((button) => {
   button.addEventListener("click", () => applyTheme(button.dataset.themeOption));
 });
@@ -405,7 +491,7 @@ $("#add-manual").addEventListener("click", async () => {
     await refreshServices();
   } catch (error) { notify(error.message, true); }
 });
-$("#refresh").addEventListener("click", refreshServices);
+$("#refresh").addEventListener("click", () => refreshServices({ animateNew: state.scan?.status === "running" }));
 $("#clear-services").addEventListener("click", async () => {
   try {
     if (state.scan?.status === "running") throw new Error("扫描进行中，暂时不能清空列表");
@@ -419,7 +505,9 @@ $("#clear-services").addEventListener("click", async () => {
 
 const manualDialog = $("#manual-dialog");
 const keyDialog = $("#key-dialog");
+const credentialDialog = $("#credential-dialog");
 const scanLogDialog = $("#scan-log-dialog");
+let credentialServiceId = "";
 $("#open-manual").addEventListener("click", () => {
   $("#open-manual").setAttribute("aria-expanded", "true");
   manualDialog.showModal();
@@ -441,12 +529,59 @@ $("#close-key").addEventListener("click", () => keyDialog.close());
 keyDialog.addEventListener("click", (event) => {
   if (event.target === keyDialog) keyDialog.close();
 });
+function openCredentialDialog(serviceId) {
+  const service = state.services.find((item) => item.id === serviceId);
+  if (!service) throw new Error("找不到要填写密钥的模型服务");
+  credentialServiceId = serviceId;
+  $("#credential-service-summary").textContent = `${service.name} · ${service.base_url}`;
+  renderCredentialKeyOptions();
+  $("#credential-saved-key").value = "";
+  $("#credential-key").value = "";
+  credentialDialog.showModal();
+  window.setTimeout(() => {
+    if (accessKeys.length) $("#credential-saved-key").focus();
+    else $("#credential-key").focus();
+  }, 0);
+}
+function closeCredentialDialog() {
+  credentialDialog.close();
+  credentialServiceId = "";
+  $("#credential-saved-key").value = "";
+  $("#credential-key").value = "";
+}
+$("#credential-saved-key").addEventListener("change", (event) => {
+  const selected = accessKeys.find((item) => item.id === event.target.value);
+  $("#credential-key").value = selected?.value || "";
+});
+$("#apply-credential").addEventListener("click", async () => {
+  try {
+    if (!credentialServiceId) throw new Error("未选择模型服务");
+    const apiKey = $("#credential-key").value.trim();
+    if (!apiKey) throw new Error("请选择常用密钥或手工输入上游 API Key");
+    await api(`/api/services/${credentialServiceId}/credential`, {
+      method: "PUT",
+      body: JSON.stringify({ api_key: apiKey }),
+    });
+    closeCredentialDialog();
+    notify("上游密钥已加载，模型清单已刷新");
+    await refreshServices();
+  } catch (error) { notify(error.message, true); }
+});
+$("#close-credential").addEventListener("click", closeCredentialDialog);
+credentialDialog.addEventListener("close", () => {
+  credentialServiceId = "";
+  $("#credential-saved-key").value = "";
+  $("#credential-key").value = "";
+});
+credentialDialog.addEventListener("click", (event) => {
+  if (event.target === credentialDialog) closeCredentialDialog();
+});
 $("#clear-active-key").addEventListener("click", async () => {
   try {
     activeAccessKeyId = "";
     persistAccessKeyring();
     renderAccessKeys();
-    notify("当前请求将不再携带访问密钥");
+    notify("FindAI 请求将不再携带访问密钥");
     await initializeDashboard();
   } catch (error) { notify(error.message, true); }
 });
@@ -494,11 +629,7 @@ document.addEventListener("click", async (event) => {
       notify("节点复检完成"); await refreshServices();
     }
     if (credential) {
-      const apiKey = window.prompt("输入该上游服务的 API Key。密钥只保存在本进程内存中：");
-      if (apiKey) {
-        await api(`/api/services/${credential.dataset.credential}/credential`, { method: "PUT", body: JSON.stringify({ api_key: apiKey }) });
-        notify("密钥已加载，模型清单已刷新"); await refreshServices();
-      }
+      openCredentialDialog(credential.dataset.credential);
     }
   } catch (error) { notify(error.message, true); }
 });
