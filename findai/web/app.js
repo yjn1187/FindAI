@@ -7,6 +7,7 @@ const $ = (selector) => document.querySelector(selector);
 let noticeTimer = null;
 let scanPollTimer = null;
 let pollBusy = false;
+let accessKeyringSynced = false;
 const serviceReveal = {
   visibleIds: new Set(),
   queuedIds: new Set(),
@@ -43,6 +44,7 @@ function applyTheme(theme, persist = true) {
 const ACCESS_KEYS_STORAGE = "findai-access-keys";
 const ACTIVE_ACCESS_KEY_STORAGE = "findai-active-key";
 const LEGACY_ACCESS_KEY_STORAGE = "findai-key";
+const SCAN_MATCH_CREDENTIALS_STORAGE = "findai-scan-match-credentials";
 
 function createAccessKeyId() {
   return `key-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
@@ -126,6 +128,7 @@ function renderAccessKeys() {
         <div class="key-item-copy"><strong>${escapeHtml(item.name)}</strong><code>${escapeHtml(maskAccessKey(item.value))}</code></div>
         <div class="key-item-actions">
           ${active ? '<span class="key-active">FindAI 使用中</span>' : `<button class="button ghost" type="button" data-use-key="${escapeHtml(item.id)}">用于 FindAI</button>`}
+          <button class="button ghost" type="button" data-copy-key="${escapeHtml(item.id)}">复制</button>
           <button class="button danger-ghost" type="button" data-delete-key="${escapeHtml(item.id)}">删除</button>
         </div>
       </div>`;
@@ -146,6 +149,26 @@ function renderCredentialKeyOptions() {
   )).join("")}`;
   select.disabled = !accessKeys.length;
   if (accessKeys.some((item) => item.id === previous)) select.value = previous;
+}
+
+function mergePersistedCredentials(credentials = []) {
+  credentials.forEach((item) => {
+    if (!item || typeof item.api_key !== "string" || !item.api_key.trim()) return;
+    const value = item.api_key.trim().slice(0, 4096);
+    const existing = accessKeys.find((candidate) => candidate.value === value);
+    const name = typeof item.name === "string" && item.name.trim()
+      ? item.name.trim().slice(0, 60)
+      : "本机密钥";
+    if (existing) {
+      existing.name = name;
+      return;
+    }
+    accessKeys.push({
+      id: `stored-${String(item.id || createAccessKeyId()).slice(0, 70)}`,
+      name,
+      value,
+    });
+  });
 }
 
 function headers(extra = {}) {
@@ -205,8 +228,39 @@ function normalizeCidrs(value) {
     .filter(Boolean)
     .map((item) => item.includes("/") ? item : `${item}/32`);
 }
+function renderScanCidrPresets(presets = []) {
+  const list = $("#scan-cidr-presets");
+  const options = [];
+  const seen = new Set();
+  presets.forEach((preset) => {
+    if (!preset || typeof preset.name !== "string" || !Array.isArray(preset.cidrs)) return;
+    const value = normalizeCidrs(preset.cidrs.join(",")).join(",");
+    if (!value || seen.has(value)) return;
+    seen.add(value);
+    options.push({ name: preset.name.trim() || "常用网段", value });
+  });
+  list.innerHTML = options.map((item) => (
+    `<option value="${escapeHtml(item.value)}">${escapeHtml(item.name)}</option>`
+  )).join("");
+}
 async function copyText(value) {
-  await navigator.clipboard.writeText(value);
+  if (navigator.clipboard?.writeText) {
+    try {
+      await navigator.clipboard.writeText(value);
+      notify("已复制到剪贴板");
+      return;
+    } catch (_) {}
+  }
+  const input = document.createElement("textarea");
+  input.value = value;
+  input.setAttribute("readonly", "");
+  input.style.position = "fixed";
+  input.style.opacity = "0";
+  document.body.appendChild(input);
+  input.select();
+  const copied = document.execCommand("copy");
+  input.remove();
+  if (!copied) throw new Error("浏览器未允许复制，请手工选择密钥");
   notify("已复制到剪贴板");
 }
 
@@ -250,6 +304,7 @@ function renderScan(scan) {
   pill.className = `status-pill ${scan.status}`;
   $("#start-scan").disabled = scan.status === "running";
   $("#clear-services").disabled = scan.status === "running";
+  $("#match-credentials").disabled = scan.status === "running" || !state.services.length;
   renderScanEvents(scan.logs || []);
 
   const scanned = scan.scanned || 0;
@@ -348,6 +403,7 @@ function revealNextService() {
 
 function renderServices(services, { animateNew = false } = {}) {
   state.services = services;
+  $("#match-credentials").disabled = state.scan?.status === "running" || !services.length;
   renderServiceMetrics(services);
   const availableIds = new Set(services.map((service) => service.id));
   serviceReveal.visibleIds = new Set([...serviceReveal.visibleIds].filter((id) => availableIds.has(id)));
@@ -412,10 +468,27 @@ async function pollScan() {
 async function initializeDashboard() {
   stopScanPolling();
   try {
-    const [config, services, scan] = await Promise.all([api("/api/config"), api("/api/services"), api("/api/scan")]);
+    if (!accessKeyringSynced && accessKeys.length) {
+      await Promise.all(accessKeys.map((item) => api("/api/credentials", {
+        method: "POST",
+        body: JSON.stringify({ name: item.name, api_key: item.value }),
+      })));
+      accessKeyringSynced = true;
+    }
+    const [config, services, scan, credentials] = await Promise.all([
+      api("/api/config"),
+      api("/api/services"),
+      api("/api/scan"),
+      api("/api/credentials"),
+    ]);
+    mergePersistedCredentials(credentials.data);
+    persistAccessKeyring();
+    renderAccessKeys();
+    accessKeyringSynced = true;
     state.config = config;
     $("#gateway-url").textContent = config.gateway_base_url;
     if (!$("#scan-cidrs").value) $("#scan-cidrs").value = normalizeCidrs(config.scan_cidrs.join(",")).join(",");
+    renderScanCidrPresets(config.scan_cidr_presets || []);
     if (!$("#scan-ports").value) $("#scan-ports").value = config.scan_ports.join(",");
     renderServices(services.data);
     state.scan = null;
@@ -449,6 +522,11 @@ async function saveCommonKey(activateForFindAI) {
       accessKeys.push(item);
       if (activateForFindAI) activeAccessKeyId = item.id;
     }
+    await Promise.all(accessKeys.map((item) => api("/api/credentials", {
+      method: "POST",
+      body: JSON.stringify({ name: item.name, api_key: item.value }),
+    })));
+    accessKeyringSynced = true;
     persistAccessKeyring();
     $("#gateway-key-name").value = "";
     $("#gateway-key").value = "";
@@ -465,6 +543,10 @@ document.querySelectorAll("[data-theme-option]").forEach((button) => {
 applyTheme(document.documentElement.dataset.theme, false);
 try { persistAccessKeyring(); } catch (_) {}
 renderAccessKeys();
+$("#scan-match-credentials").checked = localStorage.getItem(SCAN_MATCH_CREDENTIALS_STORAGE) === "true";
+$("#scan-match-credentials").addEventListener("change", (event) => {
+  localStorage.setItem(SCAN_MATCH_CREDENTIALS_STORAGE, String(event.target.checked));
+});
 $("#scan-cidrs").addEventListener("blur", () => {
   const cidrs = normalizeCidrs($("#scan-cidrs").value);
   if (cidrs.length) $("#scan-cidrs").value = cidrs.join(",");
@@ -474,7 +556,11 @@ $("#start-scan").addEventListener("click", async () => {
     const cidrs = normalizeCidrs($("#scan-cidrs").value);
     $("#scan-cidrs").value = cidrs.join(",");
     const ports = parsePorts($("#scan-ports").value);
-    const scan = await api("/api/scan", { method: "POST", body: JSON.stringify({ cidrs, ports, schemes: ["http"] }) });
+    const match_credentials = $("#scan-match-credentials").checked;
+    const scan = await api("/api/scan", {
+      method: "POST",
+      body: JSON.stringify({ cidrs, ports, schemes: ["http"], match_credentials }),
+    });
     renderScan(scan);
     if (scan.status === "running") scheduleScanPoll();
   } catch (error) { notify(error.message, true); }
@@ -492,6 +578,35 @@ $("#add-manual").addEventListener("click", async () => {
   } catch (error) { notify(error.message, true); }
 });
 $("#refresh").addEventListener("click", () => refreshServices({ animateNew: state.scan?.status === "running" }));
+$("#match-credentials").addEventListener("click", async () => {
+  const button = $("#match-credentials");
+  const startButton = $("#start-scan");
+  const clearButton = $("#clear-services");
+  const originalText = button.textContent;
+  try {
+    if (state.scan?.status === "running") throw new Error("扫描进行中，请等待扫描完成");
+    if (!state.services.length) throw new Error("当前没有可匹配的模型服务");
+    button.disabled = true;
+    startButton.disabled = true;
+    clearButton.disabled = true;
+    button.textContent = "匹配中…";
+    const result = await api("/api/services/match-credentials", {
+      method: "POST",
+      body: "{}",
+    });
+    await refreshServices();
+    notify(result.matched_services
+      ? `密钥匹配完成：新增或刷新 ${result.matched_services} 个凭据服务`
+      : `密钥匹配完成：尝试 ${result.attempts || 0} 次，未发现新的模型集合`);
+  } catch (error) {
+    notify(error.message, true);
+  } finally {
+    button.textContent = originalText;
+    button.disabled = state.scan?.status === "running" || !state.services.length;
+    startButton.disabled = state.scan?.status === "running";
+    clearButton.disabled = state.scan?.status === "running";
+  }
+});
 $("#clear-services").addEventListener("click", async () => {
   try {
     if (state.scan?.status === "running") throw new Error("扫描进行中，暂时不能清空列表");
@@ -558,12 +673,13 @@ $("#apply-credential").addEventListener("click", async () => {
     if (!credentialServiceId) throw new Error("未选择模型服务");
     const apiKey = $("#credential-key").value.trim();
     if (!apiKey) throw new Error("请选择常用密钥或手工输入上游 API Key");
+    const savedKey = accessKeys.find((item) => item.id === $("#credential-saved-key").value);
     await api(`/api/services/${credentialServiceId}/credential`, {
       method: "PUT",
-      body: JSON.stringify({ api_key: apiKey }),
+      body: JSON.stringify({ api_key: apiKey, credential_name: savedKey?.name || null }),
     });
     closeCredentialDialog();
-    notify("上游密钥已加载，模型清单已刷新");
+    notify("上游密钥已保存，模型清单已刷新");
     await refreshServices();
   } catch (error) { notify(error.message, true); }
 });
@@ -587,8 +703,13 @@ $("#clear-active-key").addEventListener("click", async () => {
 });
 $("#saved-keys").addEventListener("click", async (event) => {
   const useButton = event.target.closest("[data-use-key]");
+  const copyButton = event.target.closest("[data-copy-key]");
   const deleteButton = event.target.closest("[data-delete-key]");
   try {
+    if (copyButton) {
+      const selected = accessKeys.find((item) => item.id === copyButton.dataset.copyKey);
+      if (selected) await copyText(selected.value);
+    }
     if (useButton) {
       const selected = accessKeys.find((item) => item.id === useButton.dataset.useKey);
       if (!selected) return;
@@ -601,6 +722,10 @@ $("#saved-keys").addEventListener("click", async (event) => {
     if (deleteButton) {
       const selected = accessKeys.find((item) => item.id === deleteButton.dataset.deleteKey);
       if (!selected || !window.confirm(`确定删除已保存的“${selected.name}”吗？`)) return;
+      await api("/api/credentials", {
+        method: "DELETE",
+        body: JSON.stringify({ api_key: selected.value }),
+      });
       const wasActive = selected.id === activeAccessKeyId;
       accessKeys = accessKeys.filter((item) => item.id !== selected.id);
       if (wasActive) activeAccessKeyId = "";

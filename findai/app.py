@@ -19,13 +19,30 @@ from .gateway import ModelGateway, RouteError
 from .storage import ServiceStore
 
 
+class ScanCredentialRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=60)
+    api_key: str = Field(min_length=1, max_length=4096)
+
+
 class ScanRequest(BaseModel):
     cidrs: list[str] | None = None
     ports: list[int] | None = None
     schemes: list[str] = Field(default_factory=lambda: ["http"])
+    credentials: list[ScanCredentialRequest] = Field(default_factory=list, max_length=50)
+    match_credentials: bool = False
 
 
 class CredentialRequest(BaseModel):
+    api_key: str = Field(min_length=1, max_length=4096)
+    credential_name: str | None = Field(default=None, max_length=60)
+
+
+class SavedCredentialRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=60)
+    api_key: str = Field(min_length=1, max_length=4096)
+
+
+class DeleteCredentialRequest(BaseModel):
     api_key: str = Field(min_length=1, max_length=4096)
 
 
@@ -46,6 +63,12 @@ def _error(message: str, status_code: int, error_type: str = "findai_error") -> 
         {"error": {"message": message, "type": error_type, "param": None, "code": None}},
         status_code=status_code,
     )
+
+
+def _masked_key(api_key: str) -> str:
+    suffix = api_key[-4:]
+    prefix_length = min(8, max(4, len(api_key) - len(suffix)))
+    return f"{'•' * prefix_length}{suffix}"
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -94,6 +117,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             request.url.path == "/"
             or request.url.path.startswith("/assets/")
             or request.url.path == "/api/scan"
+            or request.url.path.startswith("/api/credentials")
         ):
             response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
             response.headers["Pragma"] = "no-cache"
@@ -127,8 +151,21 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/api/config", dependencies=[Depends(require_admin)])
     async def config(request: Request) -> dict[str, Any]:
+        default_cidrs = list(settings.scan_cidrs)
+        preset_values = {
+            tuple(value.split(",")) for value in settings.scan_cidr_presets.values()
+        }
+        scan_cidr_presets = [
+            {"name": name, "cidrs": value.split(",")}
+            for name, value in settings.scan_cidr_presets.items()
+        ]
+        if tuple(default_cidrs) not in preset_values:
+            scan_cidr_presets.insert(
+                0, {"name": "默认扫描范围", "cidrs": default_cidrs}
+            )
         return {
-            "scan_cidrs": list(settings.scan_cidrs),
+            "scan_cidrs": default_cidrs,
+            "scan_cidr_presets": scan_cidr_presets,
             "scan_ports": list(settings.scan_ports),
             "scan_interval_seconds": settings.scan_interval_seconds,
             "max_hosts": settings.max_hosts,
@@ -137,7 +174,43 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "log_level": settings.log_level.upper(),
             "gateway_base_url": f"{str(request.base_url).rstrip('/')}/v1",
             "authentication_enabled": bool(settings.gateway_key),
+            "credential_storage": store.credential_protection_mode,
+            "credential_path": str(store.credential_file_path.resolve()),
         }
+
+    @app.get("/api/credentials", dependencies=[Depends(require_admin)])
+    async def list_credentials() -> dict[str, Any]:
+        return {
+            "data": [
+                {
+                    "id": credential_id,
+                    "name": name,
+                    "masked": _masked_key(api_key),
+                    "api_key": api_key,
+                }
+                for credential_id, name, api_key in store.list_credentials()
+            ]
+        }
+
+    @app.post("/api/credentials", dependencies=[Depends(require_admin)])
+    async def save_credential(body: SavedCredentialRequest) -> dict[str, Any]:
+        api_key = body.api_key.strip()
+        if not api_key:
+            raise HTTPException(status_code=400, detail="密钥不能为空")
+        credential_id = store.save_credential(api_key, body.name)
+        return {
+            "id": credential_id,
+            "name": body.name.strip(),
+            "masked": _masked_key(api_key),
+            "persisted": True,
+        }
+
+    @app.delete("/api/credentials", dependencies=[Depends(require_admin)])
+    async def delete_credential(body: DeleteCredentialRequest) -> dict[str, bool]:
+        api_key = body.api_key.strip()
+        if not api_key:
+            raise HTTPException(status_code=400, detail="密钥不能为空")
+        return {"deleted": discovery.forget_credential(api_key)}
 
     @app.get("/api/services", dependencies=[Depends(require_admin)])
     async def list_services() -> dict[str, Any]:
@@ -151,8 +224,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.delete("/api/services", dependencies=[Depends(require_admin)])
     async def clear_services() -> dict[str, int]:
-        if discovery.state.status == "running":
-            raise HTTPException(status_code=409, detail="扫描进行中，暂时不能清空服务列表")
+        if discovery.state.status == "running" or discovery.matching_credentials:
+            raise HTTPException(
+                status_code=409,
+                detail="扫描或密钥匹配进行中，暂时不能清空服务列表",
+            )
         deleted = store.clear()
         discovery.clear_credentials()
         return {"deleted": deleted}
@@ -164,7 +240,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.post("/api/scan", status_code=202, dependencies=[Depends(require_admin)])
     async def start_scan(body: ScanRequest) -> dict[str, Any]:
         try:
-            state = discovery.start_scan(body.cidrs, body.ports, body.schemes)
+            state = discovery.start_scan(
+                body.cidrs,
+                body.ports,
+                body.schemes,
+                [(credential.name, credential.api_key) for credential in body.credentials],
+                body.match_credentials,
+            )
         except RuntimeError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         except ValueError as exc:
@@ -179,6 +261,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return service.to_dict()
 
+    @app.post(
+        "/api/services/match-credentials",
+        dependencies=[Depends(require_admin)],
+    )
+    async def match_service_credentials() -> dict[str, int]:
+        try:
+            return await discovery.match_saved_credentials()
+        except RuntimeError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
     @app.post("/api/services/{service_id}/probe", dependencies=[Depends(require_admin)])
     async def probe_service(service_id: str) -> dict[str, Any]:
         service = store.get(service_id)
@@ -191,9 +283,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         service = store.get(service_id)
         if not service:
             raise HTTPException(status_code=404, detail="Service not found")
-        discovery.set_credential(service_id, body.api_key)
-        refreshed = await discovery.probe_service(service)
-        return {"service": refreshed.to_dict(), "credential_loaded": True, "persisted": False}
+        try:
+            refreshed = await discovery.apply_credential(
+                service, body.api_key, body.credential_name
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {"service": refreshed.to_dict(), "credential_loaded": True, "persisted": True}
 
     @app.get("/v1/models", dependencies=[Depends(require_gateway)])
     async def models() -> dict[str, Any]:

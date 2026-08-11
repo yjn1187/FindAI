@@ -11,4 +11,6 @@ data/*.db-*
 data/logs/*.log
 data/logs/*.log.*
 data/*.pid
+data/credentials.json
+data/credentials.json.tmp
 .env

@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="dark light">
   <title>FindAI · 局域网模型发现</title>
-  <link rel="icon" type="image/png" sizes="64x64" href="/assets/favicon.png?v=20260810-5">
+  <link rel="icon" type="image/png" sizes="64x64" href="/assets/favicon.png?v=20260810-6">
   <script>
     try { document.documentElement.dataset.theme = localStorage.getItem("findai-theme") || "tech"; } catch (_) {}
   </script>
@@ -59,20 +59,25 @@
       <div class="scan-layout">
         <div class="scan-form">
           <div class="scan-fields">
-            <label>IPv4 网段
-              <input id="scan-cidrs" placeholder="192.168.110.0/24 或 192.168.110.8">
-              <small>多个目标用逗号分隔；单个 IP 自动补 /32</small>
+            <label>IPv4 地址 / 网段
+              <input id="scan-cidrs" list="scan-cidr-presets" autocomplete="off" placeholder="输入地址，或展开选择常用网段">
+              <datalist id="scan-cidr-presets"></datalist>
+              <small>可选择后台预设；多个目标用逗号分隔，单个 IP 自动补 /32</small>
             </label>
             <label>模型服务端口
               <input id="scan-ports" placeholder="11434,12434,1234,8000-8001">
               <small>支持逗号和范围，例如 8000-8010</small>
             </label>
           </div>
+          <label class="scan-option" for="scan-match-credentials">
+            <input id="scan-match-credentials" type="checkbox">
+            <span><strong>扫描时匹配密钥</strong><small>仅在确认目标是鉴权模型服务后，分阶段尝试本机密钥</small></span>
+          </label>
           <button id="start-scan" class="button primary scan-button">
             <span class="button-radar"></span>
             开始扫描局域网
           </button>
-          <p class="scan-note">仅访问私网地址和配置端口，不会自动发送模型推理请求。</p>
+          <p class="scan-note">关闭密钥匹配时执行快速扫描；扫描完成后也可在服务列表右上角手工匹配。</p>
         </div>
 
         <div class="scan-monitor">
@@ -113,6 +118,7 @@
       <div class="section-heading">
         <div><span class="kicker">SERVICE REGISTRY</span><h2>扫描结果与模型服务</h2></div>
         <div class="section-actions">
+          <button id="match-credentials" class="button secondary">匹配密钥</button>
           <button id="clear-services" class="button danger-ghost">清空列表</button>
           <button id="refresh" class="button ghost">刷新列表</button>
         </div>
@@ -173,7 +179,7 @@
         <span class="kicker">UPSTREAM CREDENTIAL</span>
         <h2 id="credential-dialog-title">填写模型服务密钥</h2>
         <p id="credential-service-summary">选择需要鉴权的模型服务。</p>
-        <p>可从当前浏览器保存的常用密钥快速填充；提交后，上游密钥只加载到当前 FindAI 进程内存。</p>
+        <p>可从常用密钥快速填充；提交后，上游密钥会保存到 FindAI 本机密钥库，并立即复检模型清单。</p>
       </div>
       <div class="credential-form dialog-form">
         <label>从常用密钥填充
@@ -184,7 +190,7 @@
         <label>上游 API Key
           <input id="credential-key" type="password" autocomplete="off" maxlength="4096" placeholder="选择常用密钥或手工输入">
         </label>
-        <button id="apply-credential" class="button secondary" type="button">加载密钥并复检</button>
+        <button id="apply-credential" class="button secondary" type="button">保存密钥并复检</button>
       </div>
     </div>
   </dialog>
@@ -195,7 +201,7 @@
       <div class="manual-copy">
         <span class="kicker">COMMON KEYS</span>
         <h2 id="key-dialog-title">常用密钥</h2>
-        <p>密钥仅保存在当前浏览器中。可将其中一条用于 FindAI 管理与代理鉴权，也可在模型服务需要鉴权时选择并快速填充。</p>
+        <p>密钥会保存在 FindAI 数据目录的 credentials.json 文件中，并同步到当前浏览器。可直接复制，也可在扫描时或扫描结果列表中触发匹配。</p>
       </div>
       <div class="key-form">
         <label>名称（可选）

@@ -180,6 +180,11 @@ select { cursor: pointer; }
 select:disabled { cursor: not-allowed; opacity: .62; }
 select option { color: var(--text); background: var(--surface-solid); }
 .scan-button { width: 100%; margin-top: 21px; padding: 14px 20px !important; font-size: 14px; }
+.scan-option { display: flex; align-items: center; gap: 10px; margin-top: 14px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 9px; background: var(--surface-soft); cursor: pointer; }
+.scan-option input { appearance: auto; flex: 0 0 auto; width: 15px; height: 15px; margin: 0; padding: 0; border: 0; background: transparent; box-shadow: none; accent-color: var(--accent); }
+.scan-option span, .scan-option strong, .scan-option small { display: block; }
+.scan-option strong { color: var(--text); font-size: 11px; }
+.scan-option small { margin-top: 3px; color: var(--muted); font-size: 9px; line-height: 1.4; }
 .button-radar { display: inline-block; width: 9px; height: 9px; margin-right: 8px; border: 2px solid currentColor; border-radius: 50%; box-shadow: 0 0 0 3px rgba(0, 0, 0, .1); }
 .scan-note { margin: 10px 0 0; color: var(--muted); font-size: 10px; text-align: center; }
 .scan-monitor { padding: 2px 0 0 30px; border-left: 1px solid var(--line); }

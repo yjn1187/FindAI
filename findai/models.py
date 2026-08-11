@@ -6,8 +6,16 @@ from dataclasses import asdict, dataclass, field
 from typing import Any
 
 
-def service_id_for(base_url: str) -> str:
-    return hashlib.sha256(base_url.rstrip("/").lower().encode("utf-8")).hexdigest()[:12]
+def credential_fingerprint(api_key: str) -> str:
+    """Return a stable SHA-256 fingerprint without retaining the raw credential."""
+
+    return hashlib.sha256(api_key.encode("utf-8")).hexdigest()
+
+
+def service_id_for(base_url: str, credential_id: str | None = None) -> str:
+    normalized = base_url.rstrip("/").lower()
+    identity = normalized if not credential_id else f"{normalized}\ncredential:{credential_id}"
+    return hashlib.sha256(identity.encode("utf-8")).hexdigest()[:12]
 
 
 @dataclass(slots=True)
@@ -27,9 +35,13 @@ class ServiceRecord:
     last_seen: float = field(default_factory=time.time)
     last_error: str | None = None
     failure_count: int = 0
+    credential_name: str | None = None
+    credential_id: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        data = asdict(self)
+        data.pop("credential_id", None)
+        return data
 
 
 @dataclass(slots=True)

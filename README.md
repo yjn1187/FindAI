@@ -2,9 +2,9 @@
   <img src="docs/assets/findai-icon-concept-v4-radar-service-rounded-shadow.png" alt="FindAI" width="240">
 </p>
 
-# FindAI
+<h1 align="center">FindAI</h1>
 
-FindAI 是一个面向家庭、工作室和小型机房的“局域网模型服务发现 + 注册表 + OpenAI 兼容网关”。它会扫描指定私网网段和端口，读取模型服务的公开指纹，将发现结果持久化，然后用一个稳定的 `/v1` 地址向 Dify、Open WebUI、LibreChat、LangChain 等上层系统提供模型。
+<p align="center">FindAI 是一个面向家庭、工作室和小型机房的“局域网模型服务发现 + 注册表 + OpenAI 兼容网关”。它会扫描指定私网网段和端口，读取模型服务的公开指纹，将发现结果持久化，然后用一个稳定的 <code>/v1</code> 地址向 Dify、Open WebUI、LibreChat、LangChain 等上层系统提供模型。</p>
 
 当前版本是可运行的 MVP，重点解决三个问题：不知道局域网里有哪些模型服务、每个业务系统都要重复配置地址、同名模型和节点上下线难以管理。
 
@@ -45,9 +45,11 @@ OpenAI 官方 OpenAPI 规范将模型清单定义为 `GET /v1/models`，响应�
 - 通用 JSON `POST /v1/*` 模型路由，因此可转发 Chat Completions、Embeddings、Completions 和上游已实现的 Responses 等接口。
 - Chat Completions SSE 流式透传。
 - 原生 Ollama `/api/chat` 到 OpenAI Chat Completions 的非流式与流式适配。
-- 上游 Key 可通过环境变量提供，或从浏览器常用密钥中选择并临时加载到进程内存；网页列表不会回显 Key。
+- 上游 Key 可通过环境变量或本机密钥文件提供；扫描区可选择“扫描时匹配密钥”，也可在扫描完成后只针对已识别地址手工匹配。匹配时按“地址 + 密钥”分别登记模型，支持同一地址由多把密钥提供不同模型。密钥默认保存在数据库同目录的 `credentials.json`，网页可查看掩码并复制明文。
 - 私网目标校验、最大扫描主机数、并发数和短连接超时限制。
 - 自带中文管理控制台和 FastAPI `/docs` 接口文档。
+
+由于网页复制功能需要管理接口读取密钥明文，如果 FindAI 监听 `0.0.0.0` 或可被其他设备访问，请务必配置 `FINDAI_GATEWAY_KEY`，并限制 `credentials.json` 的文件访问权限。
 
 ## Windows PowerShell 启动
 
@@ -123,6 +125,7 @@ Invoke-RestMethod -Method Post `
 | `FINDAI_HOST` | `127.0.0.1` | 监听地址；向局域网提供网关时改为 `0.0.0.0` |
 | `FINDAI_PORT` | `7070` | 管理界面和网关端口 |
 | `FINDAI_SCAN_CIDRS` | 自动推断 | 逗号分隔的私网 IPv4 CIDR |
+| `FINDAI_SCAN_CIDR_PRESETS` | 空 | 管理网页常用网段下拉项，JSON 名称到网段或网段数组的映射 |
 | `FINDAI_ALLOWED_PUBLIC_CIDRS` | 空 | 显式信任的公网 IPv4 单主机列表，只允许 `/32` |
 | `FINDAI_SCAN_PORTS` | 常见端口集合 | 支持 `8000-8010` 形式的小范围端口段 |
 | `FINDAI_SCAN_INTERVAL` | `0` | 自动重扫间隔，秒；`0` 表示关闭周期扫描 |
@@ -138,6 +141,7 @@ Invoke-RestMethod -Method Post `
 
 ```powershell
 $env:FINDAI_UPSTREAM_KEYS = '{"http://192.168.1.20:8000":"upstream-key"}'
+$env:FINDAI_SCAN_CIDR_PRESETS = '{"办公室":"192.168.1.0/24","实验室":["10.20.0.0/24","10.21.0.0/24"]}'
 ```
 
 ## 测试
@@ -187,6 +191,6 @@ FINDAI_LOG_BACKUP_COUNT=5
 - 主动扫描无法发现未列入端口集合的服务，因此保留手工添加；下一版可结合 ARP 邻居表、mDNS 和自定义 UDP 广播减少扫描量。
 - 当前健康判定只读取模型清单，不会自动产生推理费用。后续可增加明确选择后才执行的深度能力探测（工具调用、视觉、Embedding、上下文长度）。
 - 同名模型目前按失败次数和探测延迟择优。生产版可加入轮询、最少连接、GPU 负载、熔断、重试和会话粘滞。
-- 临时录入的上游 Key 不落盘。生产版应接入 Windows Credential Manager、Vault、KMS 或其他密钥管理系统。
+- 常用密钥以明文保存在本机 `credentials.json`，应用重启后仍可用于扫描时或列表后的密钥匹配。该文件已加入 `.gitignore`，但仍应限制数据目录访问权限；生产部署建议改用系统密钥环、Vault 或 KMS。
 - 通用代理目前面向 JSON 模型请求；音频上传、文件、WebSocket/Realtime 等 multipart 或双向协议需要专门适配。
 - Docker Desktop 通常位于 NAT 网络中，不一定能直接看到宿主机局域网。Windows 上建议原生运行；Linux 容器可评估 host network 模式。

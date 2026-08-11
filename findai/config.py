@@ -76,6 +76,61 @@ def parse_allowed_public_cidrs(value: str | None) -> tuple[str, ...]:
     return tuple(sorted(networks))
 
 
+def parse_scan_cidr_presets(value: str | None) -> dict[str, str]:
+    """Parse named scan ranges displayed by the dashboard's CIDR selector."""
+
+    if not value:
+        return {}
+    try:
+        payload = json.loads(value)
+    except json.JSONDecodeError as exc:
+        raise ValueError("FINDAI_SCAN_CIDR_PRESETS must be a JSON object") from exc
+    if not isinstance(payload, dict):
+        raise ValueError("FINDAI_SCAN_CIDR_PRESETS must be a JSON object")
+    if len(payload) > 50:
+        raise ValueError("FINDAI_SCAN_CIDR_PRESETS supports at most 50 entries")
+
+    presets: dict[str, str] = {}
+    for raw_name, raw_cidrs in payload.items():
+        name = str(raw_name).strip()
+        if not name or len(name) > 60:
+            raise ValueError(
+                "FINDAI_SCAN_CIDR_PRESETS names must contain 1 to 60 characters"
+            )
+        if isinstance(raw_cidrs, str):
+            values = raw_cidrs.split(",")
+        elif isinstance(raw_cidrs, list) and all(
+            isinstance(item, str) for item in raw_cidrs
+        ):
+            values = [part for item in raw_cidrs for part in item.split(",")]
+        else:
+            raise ValueError(
+                "FINDAI_SCAN_CIDR_PRESETS values must be CIDR strings or string arrays"
+            )
+
+        normalized: list[str] = []
+        seen: set[str] = set()
+        for item in values:
+            item = item.strip()
+            if not item:
+                continue
+            try:
+                network = str(IPv4Network(item, strict=False))
+            except ValueError as exc:
+                raise ValueError(
+                    f"FINDAI_SCAN_CIDR_PRESETS contains an invalid IPv4 range: {item}"
+                ) from exc
+            if network not in seen:
+                seen.add(network)
+                normalized.append(network)
+        if not normalized:
+            raise ValueError(
+                f"FINDAI_SCAN_CIDR_PRESETS entry {name!r} has no IPv4 ranges"
+            )
+        presets[name] = ",".join(normalized)
+    return presets
+
+
 def infer_local_cidrs() -> tuple[str, ...]:
     """Infer useful IPv4 scan ranges without platform-specific dependencies.
 
@@ -114,6 +169,7 @@ class Settings:
     port: int = 7070
     db_path: Path = Path("data/findai.db")
     scan_cidrs: tuple[str, ...] = field(default_factory=infer_local_cidrs)
+    scan_cidr_presets: dict[str, str] = field(default_factory=dict)
     allowed_public_cidrs: tuple[str, ...] = ()
     scan_ports: tuple[int, ...] = DEFAULT_PORTS
     scan_interval_seconds: int = 0
@@ -150,6 +206,9 @@ class Settings:
             port=int(os.getenv("FINDAI_PORT", "7070")),
             db_path=Path(os.getenv("FINDAI_DB_PATH", "data/findai.db")),
             scan_cidrs=cidrs or infer_local_cidrs(),
+            scan_cidr_presets=parse_scan_cidr_presets(
+                os.getenv("FINDAI_SCAN_CIDR_PRESETS")
+            ),
             allowed_public_cidrs=parse_allowed_public_cidrs(
                 os.getenv("FINDAI_ALLOWED_PUBLIC_CIDRS")
             ),

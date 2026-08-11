@@ -13,7 +13,14 @@ from urllib.parse import urlsplit
 import httpx
 
 from .config import Settings
-from .models import ProbeResult, ScanLogEntry, ScanState, ServiceRecord, service_id_for
+from .models import (
+    ProbeResult,
+    ScanLogEntry,
+    ScanState,
+    ServiceRecord,
+    credential_fingerprint,
+    service_id_for,
+)
 from .storage import ServiceStore
 
 
@@ -29,6 +36,20 @@ class _RangeScanProgress:
     open_ports: int = 0
     services: int = 0
     threshold_index: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class CredentialCandidate:
+    name: str
+    api_key: str
+
+
+@dataclass(frozen=True, slots=True)
+class _ProbeVariant:
+    service_id: str
+    api_key: str | None
+    credential_name: str | None
+    is_default: bool = False
 
 
 def _model_ids(payload: object, key: str) -> list[str]:
@@ -180,9 +201,29 @@ class DiscoveryManager:
         self._scan_task: asyncio.Task[None] | None = None
         self._periodic_task: asyncio.Task[None] | None = None
         self._credentials: dict[str, str] = {}
+        self._credential_probe_semaphore = asyncio.Semaphore(8)
+        self._matching_credentials = False
 
-    def set_credential(self, service_id: str, api_key: str) -> None:
+    @property
+    def matching_credentials(self) -> bool:
+        return self._matching_credentials
+
+    def set_credential(
+        self, service_id: str, api_key: str, credential_name: str | None = None
+    ) -> str:
         self._credentials[service_id] = api_key
+        credential_id = self.store.save_credential(api_key, credential_name)
+        self.store.assign_credential(service_id, credential_id)
+        return credential_id
+
+    def forget_credential(self, api_key: str) -> bool:
+        credential_id = credential_fingerprint(api_key.strip())
+        self._credentials = {
+            service_id: loaded_key
+            for service_id, loaded_key in self._credentials.items()
+            if credential_fingerprint(loaded_key) != credential_id
+        }
+        return self.store.delete_credential(credential_id)
 
     def clear_credentials(self) -> None:
         self._credentials.clear()
@@ -200,9 +241,46 @@ class DiscoveryManager:
             base_url, identifier = service.base_url, service.id
         else:
             base_url, identifier = service, service_id
-        return self._credentials.get(identifier or "") or self.settings.upstream_keys.get(
-            base_url.rstrip("/")
-        )
+        loaded = self._credentials.get(identifier or "")
+        if loaded:
+            return loaded
+        stored_service = service if isinstance(service, ServiceRecord) else None
+        if stored_service is None and identifier:
+            stored_service = self.store.get(identifier)
+        if stored_service and stored_service.credential_id:
+            persisted = self.store.get_credential(stored_service.credential_id)
+            if persisted:
+                self._credentials[stored_service.id] = persisted
+                return persisted
+        if not identifier or identifier == service_id_for(base_url):
+            return self.settings.upstream_keys.get(base_url.rstrip("/"))
+        return None
+
+    @staticmethod
+    def _normalize_credentials(
+        credentials: Iterable[CredentialCandidate | tuple[str, str]],
+    ) -> tuple[CredentialCandidate, ...]:
+        normalized: list[CredentialCandidate] = []
+        seen: set[str] = set()
+        for index, item in enumerate(credentials):
+            if isinstance(item, CredentialCandidate):
+                name, api_key = item.name, item.api_key
+            else:
+                name, api_key = item
+            clean_key = api_key.strip()[:4096]
+            if not clean_key:
+                continue
+            fingerprint = credential_fingerprint(clean_key)
+            if fingerprint in seen:
+                continue
+            seen.add(fingerprint)
+            normalized.append(
+                CredentialCandidate(
+                    name=name.strip()[:60] or f"密钥 {index + 1}",
+                    api_key=clean_key,
+                )
+            )
+        return tuple(normalized)
 
     @staticmethod
     def validate_targets(
@@ -256,64 +334,236 @@ class DiscoveryManager:
         except (TimeoutError, OSError):
             return False
 
-    async def _probe_target(self, host: str, port: int, scheme: str) -> tuple[str | None, bool]:
-        if not await self._tcp_open(host, port):
-            return None, False
-        self.state.open_ports += 1
-        base_url = f"{scheme}://{host}:{port}"
-        self._record_scan_log(
-            f"TCP 端口开放：{base_url}；请求 GET /v1/models，未匹配时继续 GET /api/tags",
-            "open",
-        )
-        identifier = service_id_for(base_url)
-        result = await self.prober.probe(base_url, self.credential_for(base_url, identifier))
-        if not result.matched:
-            logger.debug("Open port is not a compatible model API base_url=%s error=%s", base_url, result.error)
-            self._record_scan_log(
-                f"未识别模型服务：{base_url}；已尝试 /v1/models 与 /api/tags",
-                "info",
+    def _probe_variants(
+        self,
+        base_url: str,
+        credentials: tuple[CredentialCandidate, ...],
+    ) -> list[_ProbeVariant]:
+        variants: list[_ProbeVariant] = []
+        seen_credentials: set[str] = set()
+        default_id = service_id_for(base_url)
+        default_key = self.settings.upstream_keys.get(base_url.rstrip("/"))
+        variants.append(
+            _ProbeVariant(
+                service_id=default_id,
+                api_key=default_key,
+                credential_name="环境配置" if default_key else None,
+                is_default=True,
             )
-            return None, True
+        )
+        if default_key:
+            seen_credentials.add(credential_fingerprint(default_key))
+
+        for service in self.store.list_by_base_url(base_url):
+            api_key = self.credential_for(service)
+            if not api_key:
+                continue
+            fingerprint = credential_fingerprint(api_key)
+            if fingerprint in seen_credentials:
+                continue
+            seen_credentials.add(fingerprint)
+            variants.append(
+                _ProbeVariant(
+                    service_id=service.id,
+                    api_key=api_key,
+                    credential_name=service.credential_name or "已加载密钥",
+                )
+            )
+
+        for credential in credentials:
+            fingerprint = credential_fingerprint(credential.api_key)
+            if fingerprint in seen_credentials:
+                continue
+            seen_credentials.add(fingerprint)
+            variants.append(
+                _ProbeVariant(
+                    service_id=service_id_for(base_url, fingerprint),
+                    api_key=credential.api_key,
+                    credential_name=credential.name,
+                )
+            )
+        return variants
+
+    @staticmethod
+    def _result_signature(result: ProbeResult) -> tuple[str, tuple[str, ...]]:
+        return result.api_kind, tuple(result.models)
+
+    async def _probe_credential_variants(
+        self, base_url: str, variants: list[_ProbeVariant]
+    ) -> list[tuple[_ProbeVariant, ProbeResult]]:
+        async def probe_variant(variant: _ProbeVariant) -> tuple[_ProbeVariant, ProbeResult]:
+            async with self._credential_probe_semaphore:
+                return variant, await self.prober.probe(base_url, variant.api_key)
+
+        return await asyncio.gather(*(probe_variant(variant) for variant in variants))
+
+    def _register_probe_result(
+        self,
+        base_url: str,
+        host: str,
+        port: int,
+        scheme: str,
+        variant: _ProbeVariant,
+        result: ProbeResult,
+    ) -> ServiceRecord:
         name = f"{result.name} · {host}:{port}"
+        if variant.credential_name:
+            name = f"{name} · {variant.credential_name}"
         service = ServiceRecord(
-            id=identifier,
+            id=variant.service_id,
             name=name,
             host=host,
             port=port,
             scheme=scheme,
             base_url=base_url,
             api_kind=result.api_kind,
-            auth_required=result.auth_required,
+            auth_required=bool(variant.api_key) or result.auth_required,
             models=result.models,
             capabilities=result.capabilities,
             latency_ms=result.latency_ms,
             last_error=result.error,
+            credential_name=variant.credential_name,
         )
+        if variant.api_key:
+            service.credential_id = self.set_credential(
+                service.id, variant.api_key, variant.credential_name
+            )
         self.store.upsert(service)
         logger.info(
-            "Model service registered id=%s base_url=%s kind=%s models=%d auth_required=%s latency_ms=%s",
+            "Model service registered id=%s base_url=%s kind=%s models=%d "
+            "auth_required=%s credential_name=%s latency_ms=%s",
             service.id,
             service.base_url,
             service.api_kind,
             len(service.models),
             service.auth_required,
+            service.credential_name,
             round(service.latency_ms, 1) if service.latency_ms is not None else None,
         )
         endpoint = "/api/tags" if result.capabilities.get("native_ollama") else "/v1/models"
-        auth_note = " · 需要 API Key" if result.auth_required else ""
+        auth_note = (
+            f" · 匹配密钥“{variant.credential_name}”"
+            if variant.credential_name
+            else (" · 需要 API Key" if result.auth_required else "")
+        )
         self._record_scan_log(
             f"命中模型服务：{base_url} · {result.api_kind} · {len(result.models)} 个模型"
             f"{auth_note} · 来源 GET {endpoint}",
             "success",
         )
-        return base_url, True
+        return service
+
+    async def _probe_target(
+        self,
+        host: str,
+        port: int,
+        scheme: str,
+        credentials: tuple[CredentialCandidate, ...] = (),
+        match_credentials: bool = False,
+    ) -> tuple[set[str], bool]:
+        if not await self._tcp_open(host, port):
+            return set(), False
+        self.state.open_ports += 1
+        base_url = f"{scheme}://{host}:{port}"
+        variants = self._probe_variants(base_url, credentials)
+        self._record_scan_log(
+            f"TCP 端口开放：{base_url}；先进行无密钥/已配置密钥指纹识别，"
+            "请求 GET /v1/models，未匹配时继续 GET /api/tags",
+            "open",
+        )
+        default_variant = variants[0]
+        default_result = await self.prober.probe(base_url, default_variant.api_key)
+        probed_results: list[tuple[_ProbeVariant, ProbeResult]] = [
+            (default_variant, default_result)
+        ]
+        credential_variants = variants[1:]
+        preserved_credential_ids = {
+            service.id
+            for service in self.store.list_by_base_url(base_url)
+            if service.status == "online"
+            and service.credential_id
+            and any(variant.service_id == service.id for variant in credential_variants)
+        }
+        if (
+            match_credentials
+            and default_result.matched
+            and default_result.auth_required
+            and credential_variants
+        ):
+            self._record_scan_log(
+                f"确认鉴权模型服务：{base_url}；开始匹配 "
+                f"{len(credential_variants)} 个候选密钥",
+                "active",
+            )
+            probed_results.extend(
+                await self._probe_credential_variants(base_url, credential_variants)
+            )
+        authenticated_match = any(
+            variant.api_key and result.matched and not result.auth_required
+            for variant, result in probed_results
+        )
+        public_signature = (
+            self._result_signature(default_result)
+            if not default_variant.api_key
+            and default_result.matched
+            and not default_result.auth_required
+            else None
+        )
+        registered: set[str] = set()
+        for variant, result in probed_results:
+            if not result.matched:
+                continue
+            if variant.api_key and result.auth_required:
+                continue
+            if (
+                variant.is_default
+                and not variant.api_key
+                and result.auth_required
+                and (authenticated_match or preserved_credential_ids)
+            ):
+                continue
+            if (
+                variant.api_key
+                and public_signature is not None
+                and self._result_signature(result) == public_signature
+            ):
+                continue
+            service = self._register_probe_result(
+                base_url, host, port, scheme, variant, result
+            )
+            registered.add(service.id)
+
+        if not match_credentials and default_result.matched and preserved_credential_ids:
+            registered.update(preserved_credential_ids)
+            self._record_scan_log(
+                f"快速扫描确认服务地址在线：{base_url}；保留 "
+                f"{len(preserved_credential_ids)} 个已有凭据服务，不重复发送密钥",
+                "success",
+            )
+
+        if not registered:
+            logger.debug(
+                "Open port is not a compatible model API base_url=%s error=%s",
+                base_url,
+                default_result.error,
+            )
+            self._record_scan_log(
+                f"未识别模型服务：{base_url}；已尝试 /v1/models 与 /api/tags",
+                "info",
+            )
+        return registered, True
 
     async def _run_scan(
-        self, networks: list[IPv4Network], ports: list[int], schemes: list[str]
+        self,
+        networks: list[IPv4Network],
+        ports: list[int],
+        schemes: list[str],
+        credentials: tuple[CredentialCandidate, ...] = (),
+        match_credentials: bool = False,
     ) -> None:
         alive: set[str] = set()
         known_in_scope = {
-            service.base_url
+            service.id
             for service in self.store.list()
             if any(IPv4Address(service.host) in network for network in networks)
             and service.port in ports
@@ -347,12 +597,17 @@ class DiscoveryManager:
                 host, port, scheme, range_key = target
                 progress = range_progress[range_key]
                 try:
-                    found, open_port = await self._probe_target(host, port, scheme)
+                    if credentials or match_credentials:
+                        found, open_port = await self._probe_target(
+                            host, port, scheme, credentials, match_credentials
+                        )
+                    else:
+                        found, open_port = await self._probe_target(host, port, scheme)
                     if open_port:
                         progress.open_ports += 1
                     if found:
-                        alive.add(found)
-                        progress.services += 1
+                        alive.update(found)
+                        progress.services += len(found)
                         self.state.discovered = len(alive)
                 except Exception as exc:
                     # A malformed response from one host must not strand the
@@ -428,9 +683,13 @@ class DiscoveryManager:
         cidrs: Iterable[str] | None = None,
         ports: Iterable[int] | None = None,
         schemes: Iterable[str] | None = None,
+        credentials: Iterable[CredentialCandidate | tuple[str, str]] = (),
+        match_credentials: bool = False,
     ) -> ScanState:
         if self._scan_task and not self._scan_task.done():
             raise RuntimeError("A scan is already running")
+        if self._matching_credentials:
+            raise RuntimeError("Credential matching is already running")
         networks, normalized_ports, normalized_schemes = self.validate_targets(
             cidrs or self.settings.scan_cidrs,
             ports or self.settings.scan_ports,
@@ -445,6 +704,13 @@ class DiscoveryManager:
                 f"Scan expands to {total_targets} host/port targets; "
                 f"the configured limit is {self.settings.max_targets}"
             )
+        persisted_credentials = [
+            (name, api_key)
+            for _, name, api_key in self.store.list_credentials()
+        ]
+        normalized_credentials = self._normalize_credentials(
+            (*persisted_credentials, *credentials)
+        )
         self.state = ScanState(
             status="running",
             cidrs=[str(network) for network in networks],
@@ -454,12 +720,18 @@ class DiscoveryManager:
         )
         self._record_scan_log(
             f"开始扫描：{', '.join(self.state.cidrs)} · {len(normalized_ports)} 个端口 · "
-            f"{total_targets} 个目标",
+            f"{total_targets} 个目标 · "
+            f"{'分阶段匹配密钥' if match_credentials else '快速扫描，不匹配密钥'}",
             "active",
         )
         self._record_scan_log(
             "探测流程：TCP 连接 → GET /v1/models → 未匹配时 GET /api/tags；"
-            "关闭端口仅计入范围汇总，不逐条记录",
+            + (
+                "仅在确认鉴权模型服务后匹配密钥；"
+                if match_credentials
+                else "扫描完成后可在服务列表手工触发密钥匹配；"
+            )
+            + "关闭端口仅计入范围汇总，不逐条记录",
             "info",
         )
         logger.info(
@@ -471,10 +743,98 @@ class DiscoveryManager:
             max(self.settings.max_concurrency, 1),
         )
         self._scan_task = asyncio.create_task(
-            self._run_scan(networks, normalized_ports, normalized_schemes),
+            self._run_scan(
+                networks,
+                normalized_ports,
+                normalized_schemes,
+                normalized_credentials,
+                match_credentials,
+            ),
             name="findai-lan-scan",
         )
         return self.state
+
+    async def match_saved_credentials(self) -> dict[str, int]:
+        if self._scan_task and not self._scan_task.done():
+            raise RuntimeError("A scan is already running")
+        if self._matching_credentials:
+            raise RuntimeError("Credential matching is already running")
+        credentials = self._normalize_credentials(
+            (name, api_key) for _, name, api_key in self.store.list_credentials()
+        )
+        services = self.store.list(online_only=True)
+        grouped: dict[str, list[ServiceRecord]] = {}
+        for service in services:
+            grouped.setdefault(service.base_url, []).append(service)
+        if not credentials or not grouped:
+            return {
+                "addresses": len(grouped),
+                "attempts": 0,
+                "matched_services": 0,
+            }
+
+        self._matching_credentials = True
+        attempts = 0
+        matched_ids: set[str] = set()
+        self._record_scan_log(
+            f"开始列表密钥匹配：{len(grouped)} 个服务地址 · {len(credentials)} 个候选密钥",
+            "active",
+        )
+        try:
+            for base_url, base_services in grouped.items():
+                representative = base_services[0]
+                variants = [
+                    variant
+                    for variant in self._probe_variants(base_url, credentials)
+                    if variant.api_key and not variant.is_default
+                ]
+                if not variants:
+                    continue
+                attempts += len(variants)
+                results = await self._probe_credential_variants(base_url, variants)
+                public_signatures = {
+                    (service.api_kind, tuple(service.models))
+                    for service in base_services
+                    if service.models and not service.credential_name
+                }
+                matched_for_address = False
+                for variant, result in results:
+                    if not result.matched or result.auth_required:
+                        continue
+                    if self._result_signature(result) in public_signatures:
+                        continue
+                    service = self._register_probe_result(
+                        base_url,
+                        representative.host,
+                        representative.port,
+                        representative.scheme,
+                        variant,
+                        result,
+                    )
+                    matched_ids.add(service.id)
+                    matched_for_address = True
+                if matched_for_address:
+                    for service in base_services:
+                        if (
+                            service.auth_required
+                            and not service.models
+                            and not service.credential_name
+                        ):
+                            self.store.delete(service.id)
+                            self._credentials.pop(service.id, None)
+            self.state.discovered = len(self.store.list(online_only=True))
+            self._record_scan_log(
+                f"列表密钥匹配完成：尝试 {attempts} 次，新增或刷新 "
+                f"{len(matched_ids)} 个凭据服务",
+                "success",
+            )
+            return {
+                "addresses": len(grouped),
+                "attempts": attempts,
+                "matched_services": len(matched_ids),
+            }
+        finally:
+            self._matching_credentials = False
 
     async def probe_service(self, service: ServiceRecord) -> ServiceRecord:
         result = await self.prober.probe(service.base_url, self.credential_for(service))
@@ -488,9 +848,11 @@ class DiscoveryManager:
             )
         else:
             service.name = f"{result.name} · {service.host}:{service.port}"
+            if service.credential_name:
+                service.name = f"{service.name} · {service.credential_name}"
             service.api_kind = result.api_kind
             service.status = "online"
-            service.auth_required = result.auth_required
+            service.auth_required = bool(self.credential_for(service)) or result.auth_required
             service.models = result.models
             service.capabilities = result.capabilities
             service.latency_ms = result.latency_ms
@@ -507,7 +869,48 @@ class DiscoveryManager:
             )
         return self.store.get(service.id) or service
 
+    async def apply_credential(
+        self,
+        service: ServiceRecord,
+        api_key: str,
+        credential_name: str | None = None,
+    ) -> ServiceRecord:
+        clean_key = api_key.strip()
+        if not clean_key:
+            raise ValueError("API key must not be empty")
+        result = await self.prober.probe(service.base_url, clean_key)
+        if not result.matched or result.auth_required:
+            raise ValueError(result.error or "API key was rejected by the model service")
+        target_id = service_id_for(
+            service.base_url, credential_fingerprint(clean_key)
+        )
+        label = (credential_name or "手工密钥").strip()[:60] or "手工密钥"
+        refreshed = ServiceRecord(
+            id=target_id,
+            name=f"{result.name} · {service.host}:{service.port} · {label}",
+            host=service.host,
+            port=service.port,
+            scheme=service.scheme,
+            base_url=service.base_url,
+            api_kind=result.api_kind,
+            status="online",
+            auth_required=True,
+            models=result.models,
+            capabilities=result.capabilities,
+            latency_ms=result.latency_ms,
+            last_seen=time.time(),
+            last_error=result.error,
+            credential_name=label,
+        )
+        refreshed.credential_id = self.set_credential(target_id, clean_key, label)
+        self.store.upsert(refreshed)
+        if service.id != target_id and (service.credential_name or not service.models):
+            self.store.delete(service.id)
+            self._credentials.pop(service.id, None)
+        return refreshed
+
     async def add_manual(self, base_url: str, api_key: str | None = None) -> ServiceRecord:
+        api_key = api_key.strip() if api_key else None
         parts = urlsplit(base_url.rstrip("/"))
         if parts.scheme not in {"http", "https"} or not parts.hostname:
             raise ValueError("base_url must be an http(s) URL")
@@ -542,26 +945,35 @@ class DiscoveryManager:
         # a registered hostname into a proxy target outside the approved set.
         pinned_address = sorted(addresses)[0]
         normalized = f"{parts.scheme}://{pinned_address}:{port}"
-        identifier = service_id_for(normalized)
-        if api_key:
-            self.set_credential(identifier, api_key)
-        result = await self.prober.probe(normalized, self.credential_for(normalized, identifier))
-        if not result.matched:
+        identifier = service_id_for(
+            normalized, credential_fingerprint(api_key) if api_key else None
+        )
+        result = await self.prober.probe(normalized, api_key)
+        if not result.matched or (api_key and result.auth_required):
             raise ValueError(result.error or "No compatible service found")
         service = ServiceRecord(
             id=identifier,
-            name=f"{result.name} · {parts.hostname}:{port}",
+            name=(
+                f"{result.name} · {parts.hostname}:{port} · 手工密钥"
+                if api_key
+                else f"{result.name} · {parts.hostname}:{port}"
+            ),
             host=pinned_address,
             port=port,
             scheme=parts.scheme,
             base_url=normalized,
             api_kind=result.api_kind,
-            auth_required=result.auth_required,
+            auth_required=bool(api_key) or result.auth_required,
             models=result.models,
             capabilities=result.capabilities,
             latency_ms=result.latency_ms,
             last_error=result.error,
+            credential_name="手工密钥" if api_key else None,
         )
+        if api_key:
+            service.credential_id = self.set_credential(
+                identifier, api_key, "手工密钥"
+            )
         self.store.upsert(service)
         logger.info(
             "Manual service registered id=%s base_url=%s models=%d auth_required=%s",
